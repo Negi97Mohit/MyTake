@@ -1,0 +1,205 @@
+// background.js — MoodLens v2.0 service worker
+// Stores mood, mode, custom moods, and saved commands.
+// Broadcasts changes to all content scripts.
+
+const DEFAULT_MOOD = 'standard';
+const DEFAULT_MODE = 'manual';
+const DEFAULT_INTENSITY = 2;
+const DEFAULT_THEME = 'dark';
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.storage.local.set({
+    mood: DEFAULT_MOOD,
+    enabled: true,
+    mode: DEFAULT_MODE,
+    intensity: DEFAULT_INTENSITY,
+    theme: DEFAULT_THEME,
+    custom_moods: [],
+    saved_commands: [],
+    paused: false
+  });
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  switch (msg.type) {
+
+    // ── State ──────────────────────────────────────────────────────
+    case 'GET_STATE':
+      chrome.storage.local.get(['mood', 'enabled', 'mode', 'custom_moods', 'mood_custom_prompt', 'intensity', 'theme', 'paused'], (data) => {
+        sendResponse({
+          mood: data.mood || DEFAULT_MOOD,
+          enabled: data.enabled !== false,
+          mode: data.mode || DEFAULT_MODE,
+          customMoods: data.custom_moods || [],
+          customPrompt: data.mood_custom_prompt || null,
+          intensity: data.intensity || DEFAULT_INTENSITY,
+          theme: data.theme || DEFAULT_THEME,
+          paused: data.paused === true
+        });
+      });
+      return true;
+
+    // ── Mood ───────────────────────────────────────────────────────
+    case 'SET_MOOD':
+      const moodData = { mood: msg.mood };
+      if (msg.customPrompt) moodData.mood_custom_prompt = msg.customPrompt;
+      else moodData.mood_custom_prompt = null;
+      chrome.storage.local.set(moodData, () => {
+        broadcastToAllTabs({ type: 'MOOD_CHANGED', mood: msg.mood, customPrompt: msg.customPrompt || null });
+        sendResponse({ ok: true });
+      });
+      return true;
+
+    // ── Intensity ──────────────────────────────────────────────────
+    case 'SET_INTENSITY':
+      chrome.storage.local.set({ intensity: msg.intensity }, () => {
+        broadcastToAllTabs({ type: 'INTENSITY_CHANGED', intensity: msg.intensity });
+        sendResponse({ ok: true });
+      });
+      return true;
+
+    // ── Theme ──────────────────────────────────────────────────────
+    case 'SET_THEME':
+      chrome.storage.local.set({ theme: msg.theme }, () => {
+        sendResponse({ ok: true });
+      });
+      return true;
+
+    // ── Enable/Disable ────────────────────────────────────────────
+    case 'SET_ENABLED':
+      chrome.storage.local.set({ enabled: msg.enabled }, () => {
+        broadcastToAllTabs({ type: 'ENABLED_CHANGED', enabled: msg.enabled });
+        sendResponse({ ok: true });
+      });
+      return true;
+
+    // ── Mode (auto/manual) ────────────────────────────────────────
+    case 'SET_MODE':
+      chrome.storage.local.set({ mode: msg.mode }, () => {
+        broadcastToAllTabs({ type: 'MODE_CHANGED', mode: msg.mode });
+        sendResponse({ ok: true });
+      });
+      return true;
+
+    // ── Manual trigger ────────────────────────────────────────────
+    case 'TRIGGER_REWRITE':
+      sendToActiveTab({ type: 'TRIGGER_REWRITE' });
+      sendResponse({ ok: true });
+      return true;
+
+    // ── Pause / Resume / Restart ──────────────────────────────────
+    case 'SET_PAUSED':
+      chrome.storage.local.set({ paused: msg.paused }, () => {
+        broadcastToAllTabs({ type: 'PAUSED_CHANGED', paused: msg.paused });
+        sendResponse({ ok: true });
+      });
+      return true;
+
+    case 'RESTART_REPHRASE':
+      sendToActiveTab({ type: 'RESTART_REPHRASE' });
+      sendResponse({ ok: true });
+      return true;
+
+    // ── Commands CRUD ─────────────────────────────────────────────
+    case 'GET_COMMANDS':
+      chrome.storage.local.get(['saved_commands'], (data) => {
+        sendResponse({ commands: data.saved_commands || [] });
+      });
+      return true;
+
+    case 'SAVE_COMMAND':
+      chrome.storage.local.get(['saved_commands'], (data) => {
+        const commands = data.saved_commands || [];
+        const idx = commands.findIndex(c => c.id === msg.command.id);
+        if (idx >= 0) commands[idx] = msg.command;
+        else commands.push(msg.command);
+        chrome.storage.local.set({ saved_commands: commands }, () => {
+          sendResponse({ ok: true });
+        });
+      });
+      return true;
+
+    case 'DELETE_COMMAND':
+      chrome.storage.local.get(['saved_commands'], (data) => {
+        const commands = (data.saved_commands || []).filter(c => c.id !== msg.id);
+        chrome.storage.local.set({ saved_commands: commands }, () => {
+          sendResponse({ ok: true });
+        });
+      });
+      return true;
+
+    // ── Run commands on active tab ────────────────────────────────
+    case 'RUN_COMMAND':
+      sendToActiveTab({ type: 'RUN_COMMAND', commandText: msg.commandText });
+      sendResponse({ ok: true });
+      return true;
+
+    case 'RUN_COMMANDS':
+      sendToActiveTab({ type: 'RUN_COMMANDS', commands: msg.commands });
+      sendResponse({ ok: true });
+      return true;
+
+    // ── Custom Moods CRUD ─────────────────────────────────────────
+    case 'SAVE_CUSTOM_MOOD':
+      chrome.storage.local.get(['custom_moods'], (data) => {
+        const moods = data.custom_moods || [];
+        const idx = moods.findIndex(m => m.id === msg.mood.id);
+        if (idx >= 0) moods[idx] = msg.mood;
+        else moods.push(msg.mood);
+        chrome.storage.local.set({ custom_moods: moods }, () => {
+          sendResponse({ ok: true });
+        });
+      });
+      return true;
+
+    case 'DELETE_CUSTOM_MOOD':
+      chrome.storage.local.get(['custom_moods'], (data) => {
+        const moods = (data.custom_moods || []).filter(m => m.id !== msg.id);
+        chrome.storage.local.set({ custom_moods: moods }, () => {
+          sendResponse({ ok: true });
+        });
+      });
+      return true;
+
+    default:
+      return false;
+  }
+});
+
+// ── Helpers ───────────────────────────────────────────────────────
+function broadcastToAllTabs(message) {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (tab.id && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+        chrome.tabs.sendMessage(tab.id, message).catch(() => {});
+      }
+    }
+  });
+}
+
+function sendToActiveTab(message) {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (tabs[0]?.id) {
+      chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
+    }
+  });
+}
+
+// ── Track popup open state ──────────────────────────────────────────
+let popupPort = null;
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'moodlens_popup') {
+    popupPort = port;
+    sendToActiveTab({ type: 'POPUP_STATE', open: true });
+
+    port.onDisconnect.addListener(() => {
+      popupPort = null;
+      sendToActiveTab({ type: 'POPUP_STATE', open: false });
+    });
+  }
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  chrome.tabs.sendMessage(activeInfo.tabId, { type: 'POPUP_STATE', open: popupPort !== null }).catch(() => {});
+});
