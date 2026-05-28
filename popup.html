@@ -10,17 +10,13 @@
     <!-- Header -->
     <div class="header">
       <div class="logo-row">
-        <img class="logo-mark" src="icons/icon32.png" alt="MyTake" />
+        <img class="logo-mark" src="icons/icon32.png" alt="MyTake" onerror="this.style.display='none'" />
         <div class="logo-text">MyTake</div>
       </div>
       <div class="header-right">
         <button class="theme-btn" id="theme-toggle-btn" title="Toggle theme">
           &#9788;
         </button>
-        <label class="power-toggle">
-          <input type="checkbox" id="enabled-toggle" checked />
-          <span class="toggle-track"></span>
-        </label>
       </div>
     </div>
 
@@ -55,24 +51,18 @@
             <div class="globe-sphere" id="globe-sphere"></div>
             <div class="globe-inner-content">
               <span class="globe-label" id="globe-label">Standard</span>
-              <span class="globe-desc" id="globe-desc"
-                >Clean &amp; neutral</span
-              >
+              <span class="globe-desc" id="globe-desc">Clean &amp; neutral</span>
             </div>
           </div>
         </div>
 
         <!-- Carousel -->
         <div class="carousel-wrapper">
-          <button class="carousel-arrow" id="carousel-prev" title="Previous">
-            &#8249;
-          </button>
+          <button class="carousel-arrow" id="carousel-prev" title="Previous">&#8249;</button>
           <div class="carousel-viewport">
             <div class="carousel-track" id="carousel-track"></div>
           </div>
-          <button class="carousel-arrow" id="carousel-next" title="Next">
-            &#8250;
-          </button>
+          <button class="carousel-arrow" id="carousel-next" title="Next">&#8250;</button>
         </div>
 
         <!-- Intensity -->
@@ -81,43 +71,19 @@
             <span class="section-label">Intensity</span>
             <span class="intensity-badge" id="intensity-badge">Moderate</span>
           </div>
-          <input
-            type="range"
-            class="degree-slider"
-            id="degree-slider"
-            min="1"
-            max="3"
-            value="2"
-          />
+          <input type="range" class="degree-slider" id="degree-slider" min="1" max="3" value="2" />
           <div class="slider-ticks">
             <span class="tick-label" data-value="1" id="tick-1">Subtle</span>
-            <span class="tick-label active" data-value="2" id="tick-2"
-              >Moderate</span
-            >
+            <span class="tick-label active" data-value="2" id="tick-2">Moderate</span>
             <span class="tick-label" data-value="3" id="tick-3">Extreme</span>
           </div>
         </div>
 
         <!-- Action Row -->
         <div class="action-row">
-          <button class="run-btn" id="trigger-btn" title="Run rewrite now">
-            Run
-          </button>
-          <button
-            class="action-control-btn"
-            id="pause-btn"
-            title="Pause or resume"
-            disabled
-          >
-            Pause
-          </button>
-          <button
-            class="action-control-btn"
-            id="restart-btn"
-            title="Restart from scratch"
-          >
-            Restart
-          </button>
+          <button class="run-btn" id="trigger-btn" title="Run rewrite now">Run</button>
+          <button class="action-control-btn" id="pause-btn" title="Pause or resume" disabled>Pause</button>
+          <button class="action-control-btn" id="restart-btn" title="Restart from scratch">Restart</button>
         </div>
 
         <!-- Mode -->
@@ -131,7 +97,6 @@
 
       <!-- Commands Tab -->
       <div class="tab-content" id="tab-commands">
-        <!-- Under Construction State -->
         <div class="construction-container">
           <div class="construction-icon">🚧</div>
           <div class="construction-badge">COMING SOON</div>
@@ -143,27 +108,15 @@
           <div class="construction-line"></div>
         </div>
 
-        <!-- Kept hidden to prevent script crashes on missing DOM nodes -->
         <div style="display: none">
           <div class="cmd-input-row">
-            <input
-              type="text"
-              class="cmd-input"
-              id="cmd-input"
-              placeholder="e.g. Convert prices to USD..."
-            />
-            <button class="cmd-run-btn" id="cmd-run-btn" title="Run command">
-              &#8594;
-            </button>
+            <input type="text" class="cmd-input" id="cmd-input" placeholder="e.g. Convert prices to USD..." />
+            <button class="cmd-run-btn" id="cmd-run-btn" title="Run command">&#8594;</button>
           </div>
-
           <div class="cmd-section-title">Saved Commands</div>
           <div class="cmd-list" id="cmd-list"></div>
-
           <div class="cmd-bulk-row" id="cmd-bulk-row" style="display: none">
-            <button class="cmd-bulk-btn" id="cmd-run-selected">
-              Run Selected
-            </button>
+            <button class="cmd-bulk-btn" id="cmd-run-selected">Run Selected</button>
             <button class="cmd-bulk-btn" id="cmd-run-all">Run All</button>
           </div>
         </div>
@@ -178,36 +131,20 @@
 
     <!-- Status -->
     <div class="status-bar">
-      <div class="status-dot" id="status-dot"></div>
-      <span id="status-text">Loading...</span>
+      <div class="status-dot active" id="status-dot"></div>
+      <span id="status-text">Ready</span>
     </div>
 
     <!-- Footer -->
     <div class="footer">
       Made with
       <span class="heart">
-        <svg
-          stroke="currentColor"
-          fill="currentColor"
-          stroke-width="0"
-          viewBox="0 0 24 24"
-          height="9"
-          width="9"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <path
-            d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
-          />
+        <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 24 24" height="11" width="11" xmlns="http://www.w3.org/2000/svg">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
         </svg>
       </span>
       by
-      <a
-        target="_blank"
-        rel="noopener noreferrer"
-        class="author-link"
-        href="https://www.linkedin.com/in/mohit-singh-negi/"
-        >this guy</a
-      >
+      <a target="_blank" rel="noopener noreferrer" class="author-link" href="https://www.linkedin.com/in/mohit-singh-negi/">this guy</a>
     </div>
 
     <!-- Custom Mood Modal -->
@@ -216,21 +153,11 @@
         <div class="modal-title">Create Mood</div>
         <div class="modal-field">
           <label>Name</label>
-          <input
-            type="text"
-            id="custom-mood-name"
-            placeholder="e.g. Pirate, Shakespearean..."
-            maxlength="20"
-          />
+          <input type="text" id="custom-mood-name" placeholder="e.g. Pirate, Shakespearean..." maxlength="20" />
         </div>
         <div class="modal-field">
           <label>Style Description</label>
-          <input
-            type="text"
-            id="custom-mood-desc"
-            placeholder="e.g. Speak like a pirate, Arrrr!"
-            maxlength="80"
-          />
+          <input type="text" id="custom-mood-desc" placeholder="e.g. Speak like a pirate, Arrrr!" maxlength="80" />
         </div>
         <div class="modal-actions">
           <button class="btn btn-ghost" id="modal-cancel">Cancel</button>
@@ -239,6 +166,40 @@
       </div>
     </div>
 
-    <script src="popup.js"></script>
+    <!-- Preview-only seed: honors ?preview=1 to render demo content
+         without popup.js. Real extension ignores this entirely. -->
+    <script>
+      (function () {
+        try {
+          var p = new URLSearchParams(location.search);
+          if (p.get("theme") === "light") document.body.classList.add("light-theme");
+          if (p.get("preview") !== "1") return;
+
+          var moods = [
+            { i: "S",  l: "Standard",  desc: "Clean & neutral",      g: "linear-gradient(135deg,#ff2d55,#ff9f0a,#bf5af2)" },
+            { i: "🔥", l: "Hype",      desc: "Bold & energetic",     g: "linear-gradient(135deg,#ff453a,#ff9f0a)" },
+            { i: "🌊", l: "Calm",      desc: "Soft & flowing",       g: "linear-gradient(135deg,#0a84ff,#64d2ff)" },
+            { i: "🌿", l: "Zen",       desc: "Grounded & green",     g: "linear-gradient(135deg,#30d158,#a7e8b5)" },
+            { i: "🎭", l: "Dramatic",  desc: "Theatrical flair",     g: "linear-gradient(135deg,#bf5af2,#ff2d55)" },
+            { i: "+",  l: "Add",       desc: "",                     g: "" }
+          ];
+          var track = document.getElementById("carousel-track");
+          moods.forEach(function (m, idx) {
+            var el = document.createElement("div");
+            el.className = "carousel-item" + (idx === 0 ? " selected" : "") + (m.l === "Add" ? " carousel-add-item" : "");
+            el.innerHTML =
+              '<div class="item-initial">' + m.i + "</div>" +
+              '<div class="item-label">' + m.l + "</div>";
+            track.appendChild(el);
+          });
+
+          // No popup.js in preview — prevent 404
+          var s = document.querySelector('script[data-popup-js]');
+          if (s) s.remove();
+        } catch (e) {}
+      })();
+    </script>
+
+    <script src="popup.js" data-popup-js onerror="this.remove()"></script>
   </body>
 </html>
