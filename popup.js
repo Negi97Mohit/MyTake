@@ -104,6 +104,7 @@
 
     // Apply initial mood hue
     document.body.dataset.mood = currentMood;
+    document.documentElement.dataset.mood = currentMood;
 
 
     // Theme loading
@@ -154,22 +155,20 @@
     });
   });
 
-  // ── Theme Switcher ────────────────────────────────────────────────────────
-  themeToggleBtn.addEventListener("click", () => {
-    const nextTheme = currentTheme === "dark" ? "light" : "dark";
-    applyTheme(nextTheme);
-    chrome.runtime.sendMessage({ type: "SET_THEME", theme: nextTheme });
-  });
+  // ── Theme Switcher (removed; light theme forced) ──────────────────────────
+  if (themeToggleBtn) {
+    themeToggleBtn.addEventListener("click", () => {
+      const nextTheme = currentTheme === "dark" ? "light" : "dark";
+      applyTheme(nextTheme);
+      chrome.runtime.sendMessage({ type: "SET_THEME", theme: nextTheme });
+    });
+  }
 
   function applyTheme(theme) {
     currentTheme = theme;
-    if (theme === "light") {
-      document.body.classList.add("light-theme");
-      themeToggleBtn.innerHTML = "&#9790;"; // Unicode Crescent Moon
-    } else {
-      document.body.classList.remove("light-theme");
-      themeToggleBtn.innerHTML = "&#9788;"; // Unicode Sun
-    }
+    // Light theme only — dark toggle removed from UI
+    document.body.classList.remove("dark-theme");
+    document.body.classList.add("light-theme");
   }
 
   // ── Degree Slider ─────────────────────────────────────────────────────────
@@ -191,15 +190,7 @@
   function updateSliderUI(val) {
     currentIntensity = val;
     const labels = { 1: "Subtle", 2: "Moderate", 3: "Extreme" };
-    intensityBadge.textContent = labels[val] || "Moderate";
-
-    document.querySelectorAll(".tick-label").forEach((el) => {
-      el.classList.toggle("active", parseInt(el.dataset.value) === val);
-    });
-
-    // Modulate globe scale based on intensity
-    const scales = { 1: "0.88", 2: "1.0", 3: "1.12" };
-    globeSphere.style.transform = `scale(${scales[val]})`;
+    if (intensityBadge) intensityBadge.textContent = labels[val] || "Moderate";
   }
 
   // ── Mood Carousel & Globe ──────────────────────────────────────────────────
@@ -362,6 +353,7 @@
 
     // Set body data-mood so CSS per-mood hues activate
     document.body.dataset.mood = mood.id;
+    document.documentElement.dataset.mood = mood.id;
 
     // Trigger full-body hue pulse (both ::before and ::after)
     document.body.classList.remove("hue-pulse");
@@ -657,6 +649,16 @@
 
   // ── Progress ──────────────────────────────────────────────────────────────
   chrome.runtime.onMessage.addListener((msg) => {
+    // AI_STATUS is forwarded from content.js via background when AI session fails
+    if (msg.type === "AI_STATUS_UPDATE") {
+      if (!msg.available && msg.error) {
+        showAiBanner(msg.error);
+      } else if (msg.available) {
+        aiBanner.classList.remove("show");
+        updateStatus();
+      }
+    }
+
     if (msg.type === "PROGRESS_UPDATE") {
       if (msg.active) {
         runStarted = true;
@@ -678,20 +680,65 @@
     }
   });
 
-  // ── AI probe ──────────────────────────────────────────────────────────────
+  // ── AI error banner — called by content-main.js error codes ─────────────
+  const BANNER_MESSAGES = {
+    crashed: {
+      title: "Model needs an update",
+      steps: [
+        'Open <b>chrome://components</b>',
+        'Find <b>Optimization Guide On Device Model</b>',
+        'Click <b>Check for update</b>',
+        'Reload this page once updated',
+      ],
+      detail: "Gemini Nano crashed too many times — updating the model fixes this."
+    },
+    not_installed: {
+      title: "Gemini Nano not set up",
+      steps: [
+        'Open <b>chrome://flags/#prompt-api-for-gemini-nano</b> → Enable',
+        'Open <b>chrome://flags/#optimization-guide-on-device-model</b> → Enable BypassPerfRequirement',
+        'Relaunch Chrome',
+        'Open <b>chrome://components</b> → update Optimization Guide On Device Model',
+      ],
+      detail: "One-time setup required to enable Chrome's built-in AI."
+    },
+    no_api: {
+      title: "Prompt API not enabled",
+      steps: [
+        'Open <b>chrome://flags/#prompt-api-for-gemini-nano</b>',
+        'Set to <b>Enabled</b> and relaunch Chrome',
+      ],
+      detail: "The Prompt API flag needs to be turned on in Chrome."
+    },
+    downloading: {
+      title: "Model is downloading…",
+      steps: [
+        'Check progress at <b>chrome://components</b>',
+        'Reload this page once the download finishes',
+      ],
+      detail: "Gemini Nano is being installed — this only happens once."
+    },
+  };
+
+  function showAiBanner(errorCode) {
+    const msg = BANNER_MESSAGES[errorCode] || BANNER_MESSAGES.not_installed;
+    const titleEl = document.getElementById("ai-banner-title");
+    const stepsEl = document.getElementById("ai-banner-steps");
+    if (titleEl) titleEl.textContent = msg.title;
+    if (stepsEl) stepsEl.innerHTML = msg.steps.map(s => `<li>${s}</li>`).join('');
+    if (aiDetail) aiDetail.textContent = msg.detail;
+    aiBanner.classList.add("show");
+    dot.className = "status-dot";
+    statusTx.textContent = msg.title;
+  }
+
+  // ── AI probe — lightweight, just checks if API exists on active tab ───────
   async function checkAiAvailability() {
     let tab;
     try {
       [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    } catch (err) {
-      aiDetail.textContent = "Could not query active tab.";
-      return;
-    }
-
-    if (!tab?.id) {
-      aiDetail.textContent = "No active tab found.";
-      return;
-    }
+    } catch (_) { return; }
+    if (!tab?.id) return;
 
     let results;
     try {
@@ -699,52 +746,26 @@
         target: { tabId: tab.id },
         world: "MAIN",
         func: () => {
-          const lmGlobal =
-            window.LanguageModel ??
-            self.LanguageModel ??
-            globalThis.LanguageModel;
-          const ai = window.ai ?? self.ai ?? globalThis.ai ?? null;
-          return {
-            hasLanguageModelGlobal: !!lmGlobal,
-            hasLanguageModel: !!ai?.languageModel,
-            hasAssistant: !!ai?.assistant,
-            windowAi: typeof window.ai,
-          };
+          for (const root of [window, self, globalThis]) {
+            if (root.LanguageModel || root.AILanguageModel ||
+                root.ai?.languageModel || root.ai?.assistant) return true;
+          }
+          return false;
         },
       });
-    } catch (err) {
-      dot.className = "status-dot";
-      statusTx.textContent = "Cannot probe this tab";
-      return;
-    }
-
-    const report = results?.[0]?.result;
-
-    if (!report) {
-      aiBanner.classList.add("show");
-      aiDetail.textContent = "Probe blocked by page";
-      dot.className = "status-dot error";
-      statusTx.textContent = "Probe blocked";
-      return;
-    }
-
-    const aiPresent =
-      report.hasLanguageModelGlobal ||
-      report.hasLanguageModel ||
-      report.hasAssistant;
-
-    let detailStr = `LanguageModel: ${report.hasLanguageModelGlobal}`;
-    if (!report.hasLanguageModelGlobal)
-      detailStr += ` | ai: ${report.windowAi}`;
-    aiDetail.textContent = detailStr;
-
-    if (!aiPresent) {
-      aiBanner.classList.add("show");
-      dot.className = "status-dot error";
-      statusTx.textContent = "LanguageModel missing";
-    } else {
+    } catch (_) {
+      // Can't inject (chrome://, PDF, etc.) — don't show banner, not an error
       aiBanner.classList.remove("show");
       updateStatus();
+      return;
+    }
+
+    const hasAPI = results?.[0]?.result === true;
+    if (hasAPI) {
+      aiBanner.classList.remove("show");
+      updateStatus();
+    } else {
+      showAiBanner("no_api");
     }
   }
 })();

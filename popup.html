@@ -6,117 +6,166 @@
     <title>MyTake</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
-    <!-- Header -->
-    <div class="header">
-      <div class="logo-row">
-        <img class="logo-mark" src="icons/icon32.png" alt="MyTake" onerror="this.style.display='none'" />
-        <div class="logo-text">MyTake</div>
-      </div>
-      <div class="header-right">
-        <button class="theme-btn" id="theme-toggle-btn" title="Toggle theme">
-          &#9788;
-        </button>
-      </div>
-    </div>
+  <body data-mood="standard">
+    <!-- Soft ambient gradient that shifts with mood -->
+    <div class="ambient" aria-hidden="true"></div>
 
-    <!-- AI Banner -->
+    <!-- AI Banner — hidden by default, shown only when AI is unavailable -->
     <div class="ai-banner" id="ai-banner">
-      <div class="ai-banner-title">Chrome AI Unavailable</div>
-      <ol class="ai-banner-steps">
+      <div class="ai-banner-title" id="ai-banner-title">
+        Chrome AI Unavailable
+      </div>
+      <ol class="ai-banner-steps" id="ai-banner-steps">
         <li>Open <b>chrome://flags</b></li>
         <li>Enable <b>Prompt API for Gemini Nano</b></li>
         <li>Enable <b>Optimization Guide On Device Model</b></li>
         <li>Relaunch Chrome</li>
       </ol>
-      <div class="ai-detail" id="ai-detail">Probing...</div>
+      <div class="ai-detail" id="ai-detail"></div>
     </div>
 
-    <!-- Tabs -->
-    <div class="tab-bar">
+    <!-- Hidden tabs (popup.js still references them) -->
+    <div class="tab-bar" hidden aria-hidden="true">
       <button class="tab-btn active" data-tab="mood">Mood</button>
       <button class="tab-btn tab-disabled" data-tab="commands">
         Commands<span class="tab-badge">WIP</span>
       </button>
     </div>
 
-    <!-- Main content -->
     <div id="main-content">
-      <!-- Mood Tab -->
       <div class="tab-content active" id="tab-mood">
-        <!-- Globe -->
+        <!-- Headline -->
+        <h1 class="prompt-title">Choose your tone</h1>
+
+        <!-- Clover mood orb (3-leaf, hearts + stem) -->
         <div class="globe-container">
-          <div class="globe-ring">
+          <div class="globe-ring" id="globe-ring">
+            <svg class="clover" viewBox="-60 -60 120 130" aria-hidden="true">
+              <defs>
+                <radialGradient id="leafGrad" cx="50%" cy="38%" r="65%">
+                  <stop offset="0%" stop-color="hsl(var(--mood-h) 100% 82%)" />
+                  <stop
+                    offset="55%"
+                    stop-color="hsl(var(--mood-h) var(--mood-s) 55%)"
+                  />
+                  <stop
+                    offset="100%"
+                    stop-color="hsl(var(--mood-h) var(--mood-s) 35%)"
+                  />
+                </radialGradient>
+                <linearGradient id="stemGrad" x1="0" x2="0" y1="0" y2="1">
+                  <stop
+                    offset="0%"
+                    stop-color="hsl(var(--mood-h) var(--mood-s) 38%)"
+                  />
+                  <stop
+                    offset="100%"
+                    stop-color="hsl(var(--mood-h) var(--mood-s) 28%)"
+                  />
+                </linearGradient>
+              </defs>
+              <!-- stem -->
+              <path
+                d="M0 8 Q 6 30 2 60"
+                stroke="url(#stemGrad)"
+                stroke-width="4"
+                stroke-linecap="round"
+                fill="none"
+              />
+              <!-- 3 heart leaflets -->
+              <g class="clover-leaf">
+                <path
+                  d="M0 0 C -22 -8, -28 -34, -10 -38 C -2 -40, 0 -32, 0 -26 C 0 -32, 2 -40, 10 -38 C 28 -34, 22 -8, 0 0 Z"
+                  fill="url(#leafGrad)"
+                />
+              </g>
+              <g class="clover-leaf" style="transform: rotate(120deg)">
+                <path
+                  d="M0 0 C -22 -8, -28 -34, -10 -38 C -2 -40, 0 -32, 0 -26 C 0 -32, 2 -40, 10 -38 C 28 -34, 22 -8, 0 0 Z"
+                  fill="url(#leafGrad)"
+                />
+              </g>
+              <g class="clover-leaf" style="transform: rotate(240deg)">
+                <path
+                  d="M0 0 C -22 -8, -28 -34, -10 -38 C -2 -40, 0 -32, 0 -26 C 0 -32, 2 -40, 10 -38 C 28 -34, 22 -8, 0 0 Z"
+                  fill="url(#leafGrad)"
+                />
+              </g>
+              <circle cx="0" cy="0" r="3.5" fill="hsl(var(--mood-h) 90% 92%)" />
+            </svg>
             <div class="globe-hue" id="globe-hue"></div>
             <div class="globe-sphere" id="globe-sphere"></div>
-            <div class="globe-inner-content">
-              <span class="globe-label" id="globe-label">Standard</span>
-              <span class="globe-desc" id="globe-desc">Clean &amp; neutral</span>
-            </div>
           </div>
         </div>
 
-        <!-- Carousel -->
+        <!-- Mood name + desc -->
+        <div class="mood-meta">
+          <div class="globe-label" id="globe-label">Standard</div>
+          <div class="globe-desc" id="globe-desc">Clean &amp; neutral</div>
+        </div>
+
+        <!-- Mood pill chips (carousel container repurposed) -->
         <div class="carousel-wrapper">
-          <button class="carousel-arrow" id="carousel-prev" title="Previous">&#8249;</button>
+          <button class="carousel-arrow" id="carousel-prev" hidden>
+            &#8249;
+          </button>
           <div class="carousel-viewport">
             <div class="carousel-track" id="carousel-track"></div>
           </div>
-          <button class="carousel-arrow" id="carousel-next" title="Next">&#8250;</button>
+          <button class="carousel-arrow" id="carousel-next" hidden>
+            &#8250;
+          </button>
         </div>
 
-        <!-- Intensity -->
-        <div class="intensity-section">
-          <div class="intensity-header">
-            <span class="section-label">Intensity</span>
-            <span class="intensity-badge" id="intensity-badge">Moderate</span>
-          </div>
-          <input type="range" class="degree-slider" id="degree-slider" min="1" max="3" value="2" />
-          <div class="slider-ticks">
-            <span class="tick-label" data-value="1" id="tick-1">Subtle</span>
-            <span class="tick-label active" data-value="2" id="tick-2">Moderate</span>
-            <span class="tick-label" data-value="3" id="tick-3">Extreme</span>
-          </div>
-        </div>
+        <!-- Intensity slider removed -->
+        <input type="hidden" id="degree-slider" value="2" />
+        <span id="intensity-badge" hidden></span>
 
-        <!-- Action Row -->
-        <div class="action-row">
-          <button class="run-btn" id="trigger-btn" title="Run rewrite now">Run</button>
-          <button class="action-control-btn" id="pause-btn" title="Pause or resume" disabled>Pause</button>
-          <button class="action-control-btn" id="restart-btn" title="Restart from scratch">Restart</button>
-        </div>
-
-        <!-- Mode -->
+        <!-- Mode pill (compact) -->
         <div class="mode-row">
           <div class="mode-switch">
             <button class="mode-opt" data-mode="auto">Auto</button>
             <button class="mode-opt active" data-mode="manual">Manual</button>
           </div>
+          <div class="aux-controls">
+            <button
+              id="pause-btn"
+              title="Pause"
+              disabled
+              aria-label="Pause"
+            ></button>
+            <button
+              id="restart-btn"
+              title="Restart"
+              aria-label="Restart"
+            ></button>
+          </div>
         </div>
+
+        <!-- Primary CTA -->
+        <button class="run-btn" id="trigger-btn">Run</button>
       </div>
 
-      <!-- Commands Tab -->
-      <div class="tab-content" id="tab-commands">
+      <!-- Commands Tab (kept, hidden) -->
+      <div class="tab-content" id="tab-commands" hidden>
         <div class="construction-container">
           <div class="construction-icon">🚧</div>
           <div class="construction-badge">COMING SOON</div>
           <div class="construction-title">Under Construction</div>
           <div class="construction-desc">
-            Custom AI commands and unit transformations are currently being
-            refined for the next major release.
+            Custom AI commands and unit transformations are coming soon.
           </div>
-          <div class="construction-line"></div>
         </div>
-
         <div style="display: none">
           <div class="cmd-input-row">
-            <input type="text" class="cmd-input" id="cmd-input" placeholder="e.g. Convert prices to USD..." />
-            <button class="cmd-run-btn" id="cmd-run-btn" title="Run command">&#8594;</button>
+            <input type="text" class="cmd-input" id="cmd-input" />
+            <button class="cmd-run-btn" id="cmd-run-btn">→</button>
           </div>
-          <div class="cmd-section-title">Saved Commands</div>
           <div class="cmd-list" id="cmd-list"></div>
           <div class="cmd-bulk-row" id="cmd-bulk-row" style="display: none">
-            <button class="cmd-bulk-btn" id="cmd-run-selected">Run Selected</button>
+            <button class="cmd-bulk-btn" id="cmd-run-selected">
+              Run Selected
+            </button>
             <button class="cmd-bulk-btn" id="cmd-run-all">Run All</button>
           </div>
         </div>
@@ -139,12 +188,28 @@
     <div class="footer">
       Made with
       <span class="heart">
-        <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 24 24" height="11" width="11" xmlns="http://www.w3.org/2000/svg">
-          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+        <svg
+          stroke="#ff4d6d"
+          fill="#ff4d6d"
+          strokeWidth="1.5"
+          viewBox="0 0 24 24"
+          height="12"
+          width="12"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
+          />
         </svg>
       </span>
       by
-      <a target="_blank" rel="noopener noreferrer" class="author-link" href="https://www.linkedin.com/in/mohit-singh-negi/">this guy</a>
+      <a
+        target="_blank"
+        rel="noopener noreferrer"
+        class="author-link"
+        href="https://www.linkedin.com/in/mohit-singh-negi/"
+        >this guy</a
+      >
     </div>
 
     <!-- Custom Mood Modal -->
@@ -153,11 +218,21 @@
         <div class="modal-title">Create Mood</div>
         <div class="modal-field">
           <label>Name</label>
-          <input type="text" id="custom-mood-name" placeholder="e.g. Pirate, Shakespearean..." maxlength="20" />
+          <input
+            type="text"
+            id="custom-mood-name"
+            placeholder="e.g. Pirate, Shakespearean..."
+            maxlength="20"
+          />
         </div>
         <div class="modal-field">
           <label>Style Description</label>
-          <input type="text" id="custom-mood-desc" placeholder="e.g. Speak like a pirate, Arrrr!" maxlength="80" />
+          <input
+            type="text"
+            id="custom-mood-desc"
+            placeholder="e.g. Speak like a pirate, Arrrr!"
+            maxlength="80"
+          />
         </div>
         <div class="modal-actions">
           <button class="btn btn-ghost" id="modal-cancel">Cancel</button>
@@ -166,40 +241,81 @@
       </div>
     </div>
 
-    <!-- Preview-only seed: honors ?preview=1 to render demo content
-         without popup.js. Real extension ignores this entirely. -->
     <script>
       (function () {
         try {
           var p = new URLSearchParams(location.search);
-          if (p.get("theme") === "light") document.body.classList.add("light-theme");
+          if (p.get("theme") === "light")
+            document.body.classList.add("light-theme");
           if (p.get("preview") !== "1") return;
-
           var moods = [
-            { i: "S",  l: "Standard",  desc: "Clean & neutral",      g: "linear-gradient(135deg,#ff2d55,#ff9f0a,#bf5af2)" },
-            { i: "🔥", l: "Hype",      desc: "Bold & energetic",     g: "linear-gradient(135deg,#ff453a,#ff9f0a)" },
-            { i: "🌊", l: "Calm",      desc: "Soft & flowing",       g: "linear-gradient(135deg,#0a84ff,#64d2ff)" },
-            { i: "🌿", l: "Zen",       desc: "Grounded & green",     g: "linear-gradient(135deg,#30d158,#a7e8b5)" },
-            { i: "🎭", l: "Dramatic",  desc: "Theatrical flair",     g: "linear-gradient(135deg,#bf5af2,#ff2d55)" },
-            { i: "+",  l: "Add",       desc: "",                     g: "" }
+            {
+              id: "standard",
+              name: "Standard",
+              desc: "Clean & neutral",
+              c: "#c9b48a",
+            },
+            {
+              id: "cherry",
+              name: "Cherry",
+              desc: "Warm & uplifting",
+              c: "#f29bb0",
+            },
+            {
+              id: "honest",
+              name: "Honest",
+              desc: "Direct, no fluff",
+              c: "#7bc4e8",
+            },
+            {
+              id: "brutally-honest",
+              name: "Brutal",
+              desc: "Blunt & straight",
+              c: "#f08060",
+            },
+            {
+              id: "academic",
+              name: "Academic",
+              desc: "Formal & precise",
+              c: "#9d8cf0",
+            },
+            {
+              id: "casual",
+              name: "Casual",
+              desc: "Chill & relaxed",
+              c: "#7ad0a8",
+            },
+            {
+              id: "poetic",
+              name: "Poetic",
+              desc: "Evocative & rich",
+              c: "#d4a3e6",
+            },
           ];
           var track = document.getElementById("carousel-track");
-          moods.forEach(function (m, idx) {
+          moods.forEach(function (m, i) {
             var el = document.createElement("div");
-            el.className = "carousel-item" + (idx === 0 ? " selected" : "") + (m.l === "Add" ? " carousel-add-item" : "");
+            el.className = "carousel-item" + (i === 0 ? " selected" : "");
+            el.dataset.mood = m.id;
             el.innerHTML =
-              '<div class="item-initial">' + m.i + "</div>" +
-              '<div class="item-label">' + m.l + "</div>";
+              '<span class="item-swatch" style="background:' +
+              m.c +
+              '"></span><span class="item-label">' +
+              m.name +
+              "</span>";
             track.appendChild(el);
           });
-
-          // No popup.js in preview — prevent 404
-          var s = document.querySelector('script[data-popup-js]');
+          var add = document.createElement("div");
+          add.className = "carousel-item carousel-add-item";
+          add.innerHTML =
+            '<span class="item-swatch">+</span><span class="item-label">Custom</span>';
+          track.appendChild(add);
+          var s = document.querySelector("script[data-popup-js]");
           if (s) s.remove();
         } catch (e) {}
       })();
     </script>
-
+    <script src="chrome-stub.js"></script>
     <script src="popup.js" data-popup-js onerror="this.remove()"></script>
   </body>
 </html>
