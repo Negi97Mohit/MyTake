@@ -106,6 +106,16 @@
     document.body.dataset.mood = currentMood;
     document.documentElement.dataset.mood = currentMood;
 
+    // Enable toggle (may not exist in redesigned popup.html)
+    const toggle = document.getElementById("enabled-toggle");
+    if (toggle) {
+      toggle.checked = currentEnabled;
+      toggle.addEventListener("change", () => {
+        const en = toggle.checked;
+        document.getElementById("main-content")?.classList.toggle("disabled-overlay", !en);
+        chrome.runtime.sendMessage({ type: "SET_ENABLED", enabled: en });
+      });
+    }
 
     // Theme loading
     applyTheme(currentTheme);

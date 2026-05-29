@@ -39,6 +39,21 @@
       },
       onMessage: { addListener: noop },
     },
+    tabs: {
+      query: (_opts, cb) => {
+        // Return a fake tab so checkAiAvailability doesn't bail early
+        if (typeof cb === "function") setTimeout(() => cb([{ id: 1, url: "https://example.com" }]), 0);
+        // Also support promise-style (async/await)
+        return Promise.resolve([{ id: 1, url: "https://example.com" }]);
+      },
+    },
+    scripting: {
+      executeScript: (_opts) => {
+        // Pretend the Prompt API is NOT present so the banner shows setup steps
+        // (flip to `true` if you want to preview the "AI ready" state)
+        return Promise.resolve([{ result: false }]);
+      },
+    },
     storage: {
       local: {
         get: (keys, cb) => cb && cb(store),
