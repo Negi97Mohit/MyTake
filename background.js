@@ -105,6 +105,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return true;
 
+    // ── Target mode ───────────────────────────────────────────────
+    case "TARGET_MODE_ACTIVATE":
+      sendToActiveTab({ type: "TARGET_MODE_ACTIVATE" });
+      sendResponse({ ok: true });
+      return true;
+
+    case "TARGET_MODE_DEACTIVATE":
+      sendToActiveTab({ type: "TARGET_MODE_DEACTIVATE" });
+      sendResponse({ ok: true });
+      return true;
+
+    // ── Target mode exited (from content, forward to popup) ──────
+    case "TARGET_MODE_EXITED":
+      // Broadcast so popup can update its UI
+      broadcastToAllTabs({ type: "TARGET_MODE_EXITED" });
+      sendResponse({ ok: true });
+      return true;
+
     // ── Pause / Resume / Restart ──────────────────────────────────
     case "SET_PAUSED":
       chrome.storage.local.set({ paused: msg.paused }, () => {
@@ -322,4 +340,47 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
       open: popupPort !== null,
     })
     .catch(() => {});
+});
+
+// ── Target Mode region memory ────────────────────────────────────────────────
+// Stores which page regions have been processed with which mood.
+// Key: URL + element fingerprint, Value: { mood, customPrompt, timestamp }
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Note: this is a second listener — we only handle target-mode messages here
+  // to keep the logic isolated. The main listener above handles everything else.
+
+  if (msg.type === "SAVE_TARGET_REGION") {
+    const key = "target_regions";
+    chrome.storage.local.get([key], (data) => {
+      const regions = data[key] || {};
+      const pageKey = msg.pageKey; // url+fingerprint combo
+      regions[pageKey] = {
+        mood: msg.mood,
+        customPrompt: msg.customPrompt || null,
+        timestamp: Date.now(),
+      };
+      // Prune old regions (keep last 500 per page-session)
+      const entries = Object.entries(regions);
+      if (entries.length > 500) {
+        const pruned = Object.fromEntries(entries.slice(-500));
+        chrome.storage.local.set({ [key]: pruned }, () => sendResponse({ ok: true }));
+      } else {
+        chrome.storage.local.set({ [key]: regions }, () => sendResponse({ ok: true }));
+      }
+    });
+    return true;
+  }
+
+  if (msg.type === "GET_TARGET_REGIONS") {
+    chrome.storage.local.get(["target_regions"], (data) => {
+      sendResponse({ regions: data.target_regions || {} });
+    });
+    return true;
+  }
+
+  if (msg.type === "CLEAR_TARGET_REGIONS") {
+    chrome.storage.local.set({ target_regions: {} }, () => sendResponse({ ok: true }));
+    return true;
+  }
 });

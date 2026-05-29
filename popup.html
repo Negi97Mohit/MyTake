@@ -126,6 +126,9 @@
           <div class="mode-switch">
             <button class="mode-opt" data-mode="auto">Auto</button>
             <button class="mode-opt active" data-mode="manual">Manual</button>
+            <button class="mode-opt" data-mode="target" title="Click any area on the page to apply a mood to just that section">
+              <span class="target-icon">⊕</span> Target
+            </button>
           </div>
           <div class="aux-controls">
             <button
@@ -140,6 +143,13 @@
               aria-label="Restart"
             ></button>
           </div>
+        </div>
+
+        <!-- Target Mode Banner -->
+        <div class="target-banner" id="target-banner" hidden>
+          <span class="target-banner-icon">⊕</span>
+          <span>Target mode active — click any area on the page</span>
+          <button class="target-banner-exit" id="target-exit-btn" title="Exit target mode">✕</button>
         </div>
 
         <!-- Primary CTA -->

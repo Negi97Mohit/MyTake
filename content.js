@@ -51,6 +51,9 @@
   // Track nodes currently being processed by AI (inflight)
   let inflightNodes = new WeakSet();
 
+  // Per-request completion callbacks (used by target mode)
+  const inflightRequestCallbacks = new Map();
+
   // ── Viewport Observer for Lazy Translation ────────────────────────────────
   const viewportObserver = new IntersectionObserver(
     (entries) => {
@@ -206,6 +209,13 @@
         inflightNodes.delete(node);
       }
 
+      // Fire per-request callback (target mode)
+      const cb = inflightRequestCallbacks.get(msg.requestId);
+      if (cb) {
+        inflightRequestCallbacks.delete(msg.requestId);
+        cb();
+      }
+
       broadcastProgress();
       if (pendingNodes.size > 0 && (mode === "auto" || manualRunning))
         scheduleBatch();
@@ -222,6 +232,13 @@
           node.textContent = node._moodlensOriginal;
           node._moodlensRephrased = undefined;
         }
+      }
+
+      // Fire per-request callback (target mode)
+      const cb = inflightRequestCallbacks.get(msg.requestId);
+      if (cb) {
+        inflightRequestCallbacks.delete(msg.requestId);
+        cb();
       }
 
       broadcastProgress();
@@ -276,13 +293,15 @@
     if (mood === "standard") {
       console.log(`${TAG} Standard mood. Bypassing AI session.`);
       aiReady = true;
-      scheduleScan(document.body); // still scan so standard can restore originals
+      scheduleScan(document.body);
       startObserver();
       return;
     }
     console.log(
       `${TAG} Requesting AI session for mood: "${mood}" (intensity: ${intensity})`,
     );
+    // content-main will reuse the existing shared session if available,
+    // or create one if this is the first call — only one lm.create() ever.
     postToMain("INIT_SESSION", {
       mood,
       customPrompt: customPrompt || undefined,
@@ -291,12 +310,15 @@
   }
 
   function destroySession() {
+    // Signal content-main to flush its queue — but NOT destroy the shared
+    // AI session. Destroying requires a new lm.create() which increments
+    // Chrome's model crash counter. The session is reused across mood changes.
     postToMain("DESTROY_SESSION");
     aiReady = false;
   }
 
   // ── Broadcast progress to popup ─────────────────────────────────────────────
-  function broadcastProgress() {
+  function broadcastProgress(opts) {
     if (!popupOpen) return;
     try {
       const active =
@@ -314,6 +336,7 @@
             commandInflightRequests.size,
           active: active,
           paused: paused,
+          targetMode: opts?.targetMode || false,
         })
         .catch(() => {});
     } catch (_) {}
@@ -341,6 +364,10 @@
     if (processedNodes.has(node)) return;
     if (inflightNodes.has(node)) return;
 
+    // ── Smart skip: node was already processed by target mode with the SAME mood ──
+    // Check if any ancestor element was targeted with this exact mood
+    if (node._moodlensTargetMood === mood) return;
+
     if (
       node._moodlensRephrased !== undefined &&
       currentText === node._moodlensRephrased
@@ -359,9 +386,6 @@
 
     const original = node._moodlensOriginal;
     if (original.length < MIN_CHARS || original.length > MAX_CHARS) return;
-    // Note: isVisible check removed — it only checked direct parent and silently
-    // dropped many valid nodes (e.g. nodes inside nested containers). The
-    // isConnected check in processBatch handles truly disconnected nodes.
 
     const cached = getFromCache(original);
     if (cached) {
@@ -832,7 +856,954 @@
     initSession();
   }
 
-  // ── Chrome runtime messaging ───────────────────────────────────────────────
+  // ── Target Mode state ───────────────────────────────────────────────────────
+  let targetModeActive = false;
+  let targetHoveredEl = null;
+  let targetPicker = null;
+  let pickerFrozen = false; // true while picker/form open — pauses hover scanning
+  let targetLockedEl = null; // element locked in when user clicked it
+  let targetRegions = {}; // pageKey → { mood, customPrompt } for this page session
+  let targetPagePrefix = location.href.split("?")[0]; // base URL without query params
+
+  // Generate a stable fingerprint for a DOM element
+  function elementFingerprint(el) {
+    const parts = [];
+    let cur = el;
+    let depth = 0;
+    while (cur && cur !== document.body && depth < 6) {
+      const tag = cur.tagName.toLowerCase();
+      const idx = Array.from(cur.parentElement?.children || []).indexOf(cur);
+      parts.unshift(`${tag}[${idx}]`);
+      cur = cur.parentElement;
+      depth++;
+    }
+    return parts.join(">");
+  }
+
+  function makePageKey(el) {
+    return `${targetPagePrefix}::${elementFingerprint(el)}`;
+  }
+
+  // Load stored target regions from background on boot
+  function loadTargetRegions() {
+    try {
+      chrome.runtime.sendMessage({ type: "GET_TARGET_REGIONS" }, (res) => {
+        if (chrome.runtime.lastError) return;
+        const all = res?.regions || {};
+        // Filter to only this page
+        const prefix = `${targetPagePrefix}::`;
+        for (const [k, v] of Object.entries(all)) {
+          if (k.startsWith(prefix)) targetRegions[k] = v;
+        }
+        console.log(
+          `${TAG} [Target] Loaded ${Object.keys(targetRegions).length} stored target regions`,
+        );
+      });
+    } catch (_) {}
+  }
+
+  function saveTargetRegion(el, moodId, customPromptStr) {
+    const key = makePageKey(el);
+    targetRegions[key] = {
+      mood: moodId,
+      customPrompt: customPromptStr || null,
+    };
+    try {
+      chrome.runtime
+        .sendMessage({
+          type: "SAVE_TARGET_REGION",
+          pageKey: key,
+          mood: moodId,
+          customPrompt: customPromptStr || null,
+        })
+        .catch(() => {});
+    } catch (_) {}
+  }
+
+  // ── Built-in moods list for picker (mirrors popup.js) ───────────────────────
+  const PICKER_MOODS = [
+    {
+      id: "standard",
+      name: "Standard",
+      desc: "Clean & neutral",
+      color: "#8fa3b8",
+    },
+    {
+      id: "cherry",
+      name: "Cherry",
+      desc: "Warm & uplifting",
+      color: "#f06292",
+    },
+    {
+      id: "honest",
+      name: "Honest",
+      desc: "Direct, no fluff",
+      color: "#29b6f6",
+    },
+    {
+      id: "brutally-honest",
+      name: "Brutal",
+      desc: "Blunt & straight",
+      color: "#ef5350",
+    },
+    {
+      id: "academic",
+      name: "Academic",
+      desc: "Formal & precise",
+      color: "#7c4dff",
+    },
+    { id: "casual", name: "Casual", desc: "Chill & relaxed", color: "#26a69a" },
+    {
+      id: "poetic",
+      name: "Poetic",
+      desc: "Evocative & rich",
+      color: "#ce93d8",
+    },
+  ];
+
+  // ── Target Mode injected styles ──────────────────────────────────────────────
+  let targetStyleEl = null;
+
+  function injectTargetStyles() {
+    if (targetStyleEl) return;
+    targetStyleEl = document.createElement("style");
+    targetStyleEl.id = "moodlens-target-styles";
+    targetStyleEl.textContent = `
+      /* Crosshair cursor on everything while target mode is active */
+      body.moodlens-target-active,
+      body.moodlens-target-active * {
+        cursor: crosshair !important;
+      }
+
+      /* While picker is open: kill the crosshair on everything — user is done selecting */
+      body.moodlens-target-frozen,
+      body.moodlens-target-frozen * {
+        cursor: default !important;
+      }
+      /* Restore pointer/text cursors inside the picker and form */
+      .moodlens-picker-item,
+      .moodlens-picker-close,
+      .moodlens-picker-custom {
+        cursor: pointer !important;
+      }
+      #moodlens-custom-form button {
+        cursor: pointer !important;
+      }
+      #moodlens-custom-form input {
+        cursor: text !important;
+      }
+
+      /* Inspect-element-style outline on hovered element */
+      .moodlens-target-hover {
+        outline: 2px solid #1a73e8 !important;
+        outline-offset: 1px !important;
+        background-color: rgba(26, 115, 232, 0.08) !important;
+        transition: outline 60ms ease, background-color 60ms ease;
+        position: relative;
+      }
+
+      /* Label badge showing element tag, like DevTools */
+      .moodlens-target-hover::before {
+        content: attr(data-moodlens-tag);
+        position: absolute;
+        top: -20px;
+        left: 0;
+        background: #1a73e8;
+        color: #fff;
+        font: 700 10px/18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        padding: 0 6px;
+        border-radius: 3px 3px 0 0;
+        white-space: nowrap;
+        z-index: 2147483645;
+        pointer-events: none;
+        letter-spacing: 0.04em;
+      }
+
+      /* Element being processed (after click, before picker closes) */
+      .moodlens-target-processing {
+        outline: 2px dashed #f59e0b !important;
+        outline-offset: 1px !important;
+        background-color: rgba(245, 158, 11, 0.07) !important;
+        animation: moodlens-pulse 1.1s ease-in-out infinite;
+      }
+
+      @keyframes moodlens-pulse {
+        0%, 100% { outline-color: #f59e0b; }
+        50%       { outline-color: #fcd34d; }
+      }
+
+      /* Element locked in when clicked — shown while picker is open */
+      .moodlens-target-locked {
+        outline: 2px solid #1a73e8 !important;
+        outline-offset: 1px !important;
+        background-color: rgba(26, 115, 232, 0.06) !important;
+      }
+
+      /* Brief green flash when processing completes */
+      .moodlens-target-done {
+        outline: 2px solid #22c55e !important;
+        outline-offset: 1px !important;
+        background-color: rgba(34, 197, 94, 0.07) !important;
+        transition: outline-color 0.6s ease, background-color 0.6s ease;
+        animation: moodlens-done-fade 1.4s ease forwards;
+      }
+
+      @keyframes moodlens-done-fade {
+        0%   { outline-color: #22c55e; background-color: rgba(34,197,94,0.10); }
+        60%  { outline-color: #22c55e; background-color: rgba(34,197,94,0.07); }
+        100% { outline-color: transparent; background-color: transparent; }
+      }
+
+      /* Floating mood picker panel */
+      .moodlens-picker {
+        position: fixed;
+        z-index: 2147483646;
+        min-width: 210px;
+        max-width: 260px;
+        background: #fff;
+        border-radius: 12px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.07);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 13px;
+        overflow: hidden;
+        animation: moodlens-picker-in 120ms cubic-bezier(0.2,0.9,0.3,1);
+        transform-origin: top left;
+      }
+
+      @keyframes moodlens-picker-in {
+        from { opacity: 0; transform: scale(0.92); }
+        to   { opacity: 1; transform: scale(1); }
+      }
+
+      .moodlens-picker-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 12px 8px;
+        font-weight: 700;
+        font-size: 11px;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: #888;
+        border-bottom: 1px solid #f0f0f0;
+      }
+
+      .moodlens-picker-close {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: #aaa;
+        font-size: 14px;
+        line-height: 1;
+        padding: 2px 4px;
+        border-radius: 4px;
+        transition: background 80ms, color 80ms;
+      }
+      .moodlens-picker-close:hover {
+        background: #f0f0f0;
+        color: #555;
+      }
+
+      .moodlens-picker-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 8px 12px;
+        cursor: pointer;
+        transition: background 80ms;
+        position: relative;
+      }
+      .moodlens-picker-item:hover {
+        background: #f0f4ff;
+      }
+      .moodlens-picker-item:active {
+        background: #e8eeff;
+      }
+      .moodlens-picker-item.already-done::after {
+        content: "✓";
+        position: absolute;
+        right: 12px;
+        color: #1a73e8;
+        font-weight: 700;
+        font-size: 12px;
+      }
+      .moodlens-picker-item.selected-mood {
+        background: rgba(26, 115, 232, 0.07) !important;
+      }
+      .moodlens-picker-item.selected-mood .moodlens-picker-label {
+        color: #1a73e8;
+      }
+
+      .moodlens-swatch {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+      }
+
+      .moodlens-picker-label {
+        font-weight: 600;
+        color: #111;
+        font-size: 13px;
+        min-width: 58px;
+      }
+
+      .moodlens-picker-desc {
+        font-size: 11px;
+        color: #888;
+        flex: 1;
+      }
+
+      .moodlens-picker-divider {
+        height: 1px;
+        background: #f0f0f0;
+        margin: 2px 0;
+      }
+
+      .moodlens-picker-custom {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px 10px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        color: #666;
+        transition: background 80ms, color 80ms;
+      }
+      .moodlens-picker-custom:hover {
+        background: #f5f5f5;
+        color: #111;
+      }
+      .moodlens-picker-custom span:first-child {
+        color: #a78bfa;
+        font-size: 14px;
+      }
+
+      /* Floating processing badge */
+      #moodlens-processing-badge {
+        position: fixed;
+        z-index: 2147483647;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 12px 6px 9px;
+        background: #1a1a1a;
+        color: #fff;
+        border-radius: 999px;
+        font: 600 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.08);
+        pointer-events: none;
+        white-space: nowrap;
+        animation: mlbadge-in 150ms cubic-bezier(0.2,0.9,0.3,1);
+        transform-origin: top right;
+      }
+      @keyframes mlbadge-in {
+        from { opacity: 0; transform: scale(0.85); }
+        to   { opacity: 1; transform: scale(1); }
+      }
+      .mlbadge-spinner {
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(255,255,255,0.25);
+        border-top-color: #f59e0b;
+        border-radius: 50%;
+        flex-shrink: 0;
+        animation: mlbadge-spin 0.7s linear infinite;
+      }
+      @keyframes mlbadge-spin {
+        to { transform: rotate(360deg); }
+      }
+      .mlbadge-text {
+        color: rgba(255,255,255,0.85);
+        letter-spacing: 0.01em;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(targetStyleEl);
+  }
+
+  function removeTargetStyles() {
+    if (targetStyleEl) {
+      targetStyleEl.remove();
+      targetStyleEl = null;
+    }
+    // Clean up any tag labels we set
+    document.querySelectorAll("[data-moodlens-tag]").forEach((el) => {
+      el.removeAttribute("data-moodlens-tag");
+    });
+  }
+
+  // ── Target Mode activation / deactivation ────────────────────────────────────
+  function activateTargetMode() {
+    if (targetModeActive) return;
+    targetModeActive = true;
+    pickerFrozen = false;
+    targetLockedEl = null;
+    injectTargetStyles();
+    document.body.classList.add("moodlens-target-active");
+    document.addEventListener("mouseover", onTargetMouseOver, true);
+    document.addEventListener("mouseout", onTargetMouseOut, true);
+    document.addEventListener("click", onTargetClick, true);
+    document.addEventListener("keydown", onTargetKeyDown, true);
+    console.log(`${TAG} [Target] Mode activated`);
+  }
+
+  function deactivateTargetMode() {
+    if (!targetModeActive) return;
+    targetModeActive = false;
+    pickerFrozen = false;
+    targetLockedEl = null;
+    document.body.classList.remove("moodlens-target-active");
+    document.body.classList.remove("moodlens-target-frozen");
+    document.removeEventListener("mouseover", onTargetMouseOver, true);
+    document.removeEventListener("mouseout", onTargetMouseOut, true);
+    document.removeEventListener("click", onTargetClick, true);
+    document.removeEventListener("keydown", onTargetKeyDown, true);
+    clearTargetHover();
+    clearTargetLocked();
+    dismissPicker();
+    removeProcessingBadge();
+    removeTargetStyles();
+    console.log(`${TAG} [Target] Mode deactivated`);
+    // Notify popup
+    try {
+      chrome.runtime
+        .sendMessage({ type: "TARGET_MODE_EXITED" })
+        .catch(() => {});
+    } catch (_) {}
+  }
+
+  // Resume hover scanning after picker/form is closed
+  function unfreezeTargetMode() {
+    pickerFrozen = false;
+    targetLockedEl = null;
+    document.body.classList.remove("moodlens-target-frozen");
+    clearTargetLocked();
+  }
+
+  function clearTargetLocked() {
+    // Remove locked highlight from all elements (safety sweep)
+    document.querySelectorAll(".moodlens-target-locked").forEach((el) => {
+      el.classList.remove("moodlens-target-locked");
+    });
+  }
+
+  function clearTargetHover() {
+    if (targetHoveredEl) {
+      targetHoveredEl.classList.remove("moodlens-target-hover");
+      targetHoveredEl.removeAttribute("data-moodlens-tag");
+      targetHoveredEl = null;
+    }
+  }
+
+  function onTargetKeyDown(e) {
+    if (e.key === "Escape") {
+      if (pickerFrozen) {
+        const form = document.getElementById("moodlens-custom-form");
+        if (form) form.remove();
+        dismissPicker(); // closes picker + exits target mode
+        return;
+      }
+      deactivateTargetMode();
+      try {
+        chrome.runtime
+          .sendMessage({ type: "SET_MODE", mode: "manual" })
+          .catch(() => {});
+      } catch (_) {}
+    }
+  }
+
+  function isPickerEl(el) {
+    if (targetPicker && targetPicker.contains(el)) return true;
+    const form = document.getElementById("moodlens-custom-form");
+    if (form && form.contains(el)) return true;
+    return false;
+  }
+
+  function onTargetMouseOver(e) {
+    if (pickerFrozen) return;
+    if (isPickerEl(e.target)) return;
+    const el = getBestTargetElement(e.target);
+    if (!el || el === targetHoveredEl) return;
+    clearTargetHover();
+    targetHoveredEl = el;
+    el.classList.add("moodlens-target-hover");
+    el.setAttribute("data-moodlens-tag", el.tagName.toLowerCase());
+  }
+
+  function onTargetMouseOut(e) {
+    if (pickerFrozen) return;
+    if (isPickerEl(e.relatedTarget)) return;
+    clearTargetHover();
+  }
+
+  function onTargetClick(e) {
+    if (isPickerEl(e.target)) return;
+    if (pickerFrozen) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = getBestTargetElement(e.target) || e.target;
+    clearTargetHover();
+
+    // Pause hover/click scanning — area is locked in, user can't select another.
+    // We keep targetModeActive=true so the stylesheet (and picker styles) stay injected.
+    pickerFrozen = true;
+    targetLockedEl = el;
+    el.classList.add("moodlens-target-locked");
+    document.body.classList.add("moodlens-target-frozen");
+
+    showPicker(el, e.clientX, e.clientY);
+  }
+
+  // Walk up to find a meaningful content block to target
+  function getBestTargetElement(el) {
+    const BLOCK_TAGS = new Set([
+      "P",
+      "H1",
+      "H2",
+      "H3",
+      "H4",
+      "H5",
+      "H6",
+      "LI",
+      "TD",
+      "TH",
+      "BLOCKQUOTE",
+      "ARTICLE",
+      "SECTION",
+      "DIV",
+      "HEADER",
+      "FOOTER",
+      "MAIN",
+      "ASIDE",
+      "NAV",
+      "FIGURE",
+      "FIGCAPTION",
+    ]);
+    let cur = el;
+    for (let i = 0; i < 8; i++) {
+      if (!cur || cur === document.body) break;
+      if (BLOCK_TAGS.has(cur.tagName)) return cur;
+      cur = cur.parentElement;
+    }
+    return el;
+  }
+
+  // ── Floating Mood Picker ──────────────────────────────────────────────────────
+  // Remove picker DOM only — no side effects. Used internally when replacing picker.
+  function closePicker() {
+    if (targetPicker) {
+      targetPicker.remove();
+      targetPicker = null;
+    }
+  }
+
+  // Close picker AND fully exit target mode. Used by close button, outside click, Escape.
+  function dismissPicker() {
+    closePicker();
+    if (pickerFrozen || targetModeActive) {
+      deactivateTargetMode();
+      try {
+        chrome.runtime
+          .sendMessage({ type: "SET_MODE", mode: "manual" })
+          .catch(() => {});
+      } catch (_) {}
+    }
+  }
+
+  function showPicker(targetEl, clientX, clientY) {
+    closePicker(); // clear any existing picker without side-effects
+
+    // Fetch custom moods from storage before rendering
+    try {
+      chrome.storage.local.get(["custom_moods"], (data) => {
+        const customMoods = data?.custom_moods || [];
+        renderPicker(targetEl, clientX, clientY, customMoods);
+      });
+    } catch (_) {
+      renderPicker(targetEl, clientX, clientY, []);
+    }
+  }
+
+  function renderPicker(targetEl, clientX, clientY, customMoods) {
+    const picker = document.createElement("div");
+    picker.className = "moodlens-picker";
+    targetPicker = picker;
+
+    const allMoods = [
+      ...PICKER_MOODS,
+      ...customMoods.map((m) => ({
+        id: m.id,
+        name: m.name,
+        desc: m.desc,
+        color: (m.gradient?.match(/#[0-9a-fA-F]{6}/) || [])[0] || "#a78bfa",
+        prompt: m.prompt,
+        isCustom: true,
+      })),
+    ];
+
+    const key = makePageKey(targetEl);
+    const existingRegion = targetRegions[key];
+
+    picker.innerHTML = `
+      <div class="moodlens-picker-header">
+        <span>Apply tone to selection</span>
+        <button class="moodlens-picker-close" title="Close">✕</button>
+      </div>
+    `;
+
+    picker
+      .querySelector(".moodlens-picker-close")
+      .addEventListener("click", (e) => {
+        e.stopPropagation();
+        dismissPicker();
+      });
+
+    for (const m of allMoods) {
+      const isAlreadyDone = existingRegion?.mood === m.id;
+      const item = document.createElement("div");
+      // Only show the ✓ checkmark for already-applied moods, but don't
+      // pre-highlight (selected-mood) anything — picker opens neutral every time.
+      item.className =
+        "moodlens-picker-item" + (isAlreadyDone ? " already-done" : "");
+      item.innerHTML = `
+        <span class="moodlens-swatch" style="background:${m.color}"></span>
+        <span class="moodlens-picker-label">${m.name}</span>
+        <span class="moodlens-picker-desc">${m.desc}</span>
+      `;
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closePicker();
+        // Switch locked outline → processing outline immediately
+        targetEl.classList.remove("moodlens-target-locked");
+        targetEl.classList.add("moodlens-target-processing");
+        // Show the floating processing badge near the element
+        showProcessingBadge(targetEl);
+        // Keep pickerFrozen=true — user cannot select any more areas.
+        // Target mode stays visually active (styles injected) but no hover/click
+        // events fire because pickerFrozen blocks them. User must re-press
+        // Target in the popup to start a fresh selection.
+        applyTargetMood(targetEl, m.id, m.prompt || null);
+      });
+      picker.appendChild(item);
+    }
+
+    // Divider + Custom button
+    const div = document.createElement("div");
+    div.className = "moodlens-picker-divider";
+    picker.appendChild(div);
+
+    const customBtn = document.createElement("div");
+    customBtn.className = "moodlens-picker-custom";
+    customBtn.innerHTML = `<span>✦</span><span>Create Custom…</span>`;
+    customBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // Close picker UI only, don't deactivate yet — form handles final deactivation
+      closePicker();
+      openCustomMoodInlineForm(targetEl);
+    });
+    picker.appendChild(customBtn);
+
+    document.body.appendChild(picker);
+
+    // Position near cursor, keep on screen
+    const vw = window.innerWidth,
+      vh = window.innerHeight;
+    const pw = picker.offsetWidth || 220,
+      ph = picker.offsetHeight || 300;
+    let x = clientX + 12,
+      y = clientY + 8;
+    if (x + pw > vw - 8) x = clientX - pw - 8;
+    if (y + ph > vh - 8) y = clientY - ph - 8;
+    picker.style.left = Math.max(8, x) + "px";
+    picker.style.top = Math.max(8, y) + "px";
+
+    // Click outside the picker closes it.
+    // Use bubble phase (not capture) and a longer delay so synthetic clicks from
+    // the popup closing don't accidentally trigger this.
+    setTimeout(() => {
+      function outsideClick(ev) {
+        if (!targetPicker) {
+          document.removeEventListener("click", outsideClick, false);
+          return;
+        }
+        if (targetPicker.contains(ev.target)) return;
+        document.removeEventListener("click", outsideClick, false);
+        dismissPicker();
+      }
+      document.addEventListener("click", outsideClick, false);
+    }, 300);
+  }
+
+  // ── Inline custom mood form (shown on page when picker is closed) ─────────────
+  function openCustomMoodInlineForm(targetEl) {
+    const form = document.createElement("div");
+    form.id = "moodlens-custom-form"; // needed by isPickerEl() to protect clicks
+    form.style.cssText = `
+      position:fixed; z-index:2147483647;
+      top:50%; left:50%; transform:translate(-50%,-50%);
+      background:#fff; border-radius:16px;
+      box-shadow:0 20px 60px rgba(0,0,0,0.22), 0 0 0 1px rgba(0,0,0,0.06);
+      padding:20px; width:300px; max-width:90vw;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      cursor:default;
+    `;
+    form.innerHTML = `
+      <div style="font-weight:800;font-size:15px;margin-bottom:14px;color:#111">Create Custom Mood</div>
+      <div style="margin-bottom:10px">
+        <label style="display:block;font-size:10px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Name</label>
+        <input id="ml-cname" placeholder="e.g. Pirate, Shakespearean…" maxlength="20"
+          style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid #e2e2e2;font-size:13px;box-sizing:border-box;outline:none;font-family:inherit;cursor:text"/>
+      </div>
+      <div style="margin-bottom:14px">
+        <label style="display:block;font-size:10px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Style Description</label>
+        <input id="ml-cdesc" placeholder="e.g. Speak like a pirate, Arrrr!" maxlength="80"
+          style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid #e2e2e2;font-size:13px;box-sizing:border-box;outline:none;font-family:inherit;cursor:text"/>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="ml-ccancel" style="flex:1;padding:9px;border-radius:999px;border:1.5px solid #e2e2e2;background:#fff;font-size:13px;font-weight:600;cursor:pointer">Cancel</button>
+        <button id="ml-csave"   style="flex:1;padding:9px;border-radius:999px;border:0;background:#111;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Apply</button>
+      </div>
+    `;
+    document.body.appendChild(form);
+
+    const cname = form.querySelector("#ml-cname");
+    const cdesc = form.querySelector("#ml-cdesc");
+    cname.focus();
+
+    function closeForm() {
+      form.remove();
+      deactivateTargetMode();
+      try {
+        chrome.runtime
+          .sendMessage({ type: "SET_MODE", mode: "manual" })
+          .catch(() => {});
+      } catch (_) {}
+    }
+
+    form.querySelector("#ml-ccancel").addEventListener("click", closeForm);
+    form.querySelector("#ml-csave").addEventListener("click", () => {
+      const name = cname.value.trim(),
+        desc = cdesc.value.trim();
+      if (!name || !desc) {
+        (name ? cdesc : cname).focus();
+        return;
+      }
+      const prompt = `You rephrase text in a ${name} style. ${desc}. Output ONLY the rephrased text, nothing else.`;
+      const id =
+        "custom-" +
+        name.toLowerCase().replace(/[^a-z0-9]/g, "-") +
+        "-" +
+        Date.now();
+      const newMood = {
+        id,
+        name,
+        desc,
+        prompt,
+        gradient: "linear-gradient(135deg,#f472b6,#a78bfa)",
+      };
+      try {
+        chrome.runtime
+          .sendMessage({ type: "SAVE_CUSTOM_MOOD", mood: newMood })
+          .catch(() => {});
+      } catch (_) {}
+      form.remove();
+      targetEl.classList.remove("moodlens-target-locked");
+      targetEl.classList.add("moodlens-target-processing");
+      showProcessingBadge(targetEl);
+      // Stay frozen — user must re-press Target in popup for a new selection
+      applyTargetMood(targetEl, id, prompt);
+    });
+
+    form.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeForm();
+      }
+    });
+  }
+
+  // ── Floating processing badge ────────────────────────────────────────────────
+  let processingBadgeEl = null;
+
+  function showProcessingBadge(targetEl) {
+    removeProcessingBadge();
+
+    const badge = document.createElement("div");
+    badge.id = "moodlens-processing-badge";
+    badge.innerHTML = `
+      <span class="mlbadge-spinner"></span>
+      <span class="mlbadge-text">Applying…</span>
+    `;
+    document.body.appendChild(badge);
+    processingBadgeEl = badge;
+
+    positionProcessingBadge(targetEl);
+
+    // Reposition on scroll / resize
+    badge._targetEl = targetEl;
+    badge._onScroll = () => positionProcessingBadge(targetEl);
+    window.addEventListener("scroll", badge._onScroll, { passive: true });
+    window.addEventListener("resize", badge._onScroll, { passive: true });
+  }
+
+  function positionProcessingBadge(targetEl) {
+    const badge = processingBadgeEl;
+    if (!badge || !targetEl.isConnected) return;
+
+    const rect = targetEl.getBoundingClientRect();
+    const bw = badge.offsetWidth || 110;
+    const bh = badge.offsetHeight || 28;
+    const margin = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Try to place it just above the element's top-right corner
+    let x = rect.right - bw;
+    let y = rect.top - bh - margin;
+
+    // If too high, place below instead
+    if (y < margin) y = rect.bottom + margin;
+    // Clamp horizontally
+    if (x + bw > vw - margin) x = vw - bw - margin;
+    if (x < margin) x = margin;
+    // Clamp vertically
+    if (y + bh > vh - margin) y = vh - bh - margin;
+    if (y < margin) y = margin;
+
+    badge.style.left = x + "px";
+    badge.style.top = y + "px";
+  }
+
+  function removeProcessingBadge() {
+    if (!processingBadgeEl) return;
+    if (processingBadgeEl._onScroll) {
+      window.removeEventListener("scroll", processingBadgeEl._onScroll);
+      window.removeEventListener("resize", processingBadgeEl._onScroll);
+    }
+    processingBadgeEl.remove();
+    processingBadgeEl = null;
+  }
+
+  // ── Apply mood to a specific element ─────────────────────────────────────────
+  // Lookup table mirrors content-main.js MOOD_PROMPTS
+  const TARGET_MOOD_PROMPTS = {
+    standard:
+      "You rephrase text in a clean, neutral, everyday style. Keep the exact meaning. Output ONLY the rephrased text, nothing else.",
+    cherry:
+      "You rephrase text in a warm, cheerful, uplifting tone — like a good friend sharing great news. Add a little brightness without changing the facts. Output ONLY the rephrased text, nothing else.",
+    honest:
+      "You rephrase text in a direct, clear, no-fluff style. Cut jargon. Say exactly what is meant. Output ONLY the rephrased text, nothing else.",
+    "brutally-honest":
+      "You rephrase text in a blunt, no-nonsense tone. Strip all softening language. Say it straight, even if it stings. Never soften the message. Output ONLY the rephrased text, nothing else.",
+    academic:
+      "You rephrase text in a formal academic register — precise terminology, measured tone, passive constructions where natural. Output ONLY the rephrased text, nothing else.",
+    casual:
+      "You rephrase text like a laid-back friend texting — short, relaxed, maybe a little playful. Keep the meaning, lose the formality. Output ONLY the rephrased text, nothing else.",
+    poetic:
+      "You rephrase text with gentle poetic flair — evocative word choices, a light rhythm, nothing flowery. Still clear, just beautiful. Output ONLY the rephrased text, nothing else.",
+  };
+
+  async function applyTargetMood(targetEl, moodId, customPromptStr) {
+    console.log(`${TAG} [Target] Applying mood "${moodId}" to`, targetEl);
+
+    // Save region memory
+    saveTargetRegion(targetEl, moodId, customPromptStr);
+
+    if (moodId === "standard") {
+      // Restore originals in this subtree
+      const walker = document.createTreeWalker(targetEl, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        if (n._moodlensOriginal) {
+          n.textContent = n._moodlensOriginal;
+          n._moodlensRephrased = undefined;
+        }
+      }
+      return;
+    }
+
+    // Resolve the system prompt for this mood — custom prompt takes priority
+    const systemPrompt =
+      customPromptStr ||
+      TARGET_MOOD_PROMPTS[moodId] ||
+      TARGET_MOOD_PROMPTS.standard;
+
+    // Mark element as processing
+    targetEl.classList.add("moodlens-target-processing");
+
+    // Collect eligible text nodes inside the target element only
+    const targetNodes = [];
+    const walker = document.createTreeWalker(targetEl, NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        if (!n.parentElement) return NodeFilter.FILTER_REJECT;
+        if (SKIP_TAGS.has(n.parentElement.tagName.toUpperCase()))
+          return NodeFilter.FILTER_REJECT;
+        if (isExcludedAncestry(n)) return NodeFilter.FILTER_REJECT;
+        const text = n.textContent.trim();
+        if (text.length < MIN_CHARS || text.length > MAX_CHARS)
+          return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n._moodlensOriginal === undefined)
+        n._moodlensOriginal = n.textContent.trim();
+      n._moodlensRephrased = undefined;
+      n._moodlensTargetMood = moodId;
+      targetNodes.push(n);
+    }
+
+    if (targetNodes.length === 0) {
+      targetEl.classList.remove("moodlens-target-processing");
+      return;
+    }
+
+    let remaining = targetNodes.length;
+    function onTargetNodeDone() {
+      remaining--;
+      if (remaining <= 0) {
+        targetEl.classList.remove("moodlens-target-processing");
+        removeProcessingBadge();
+        // Brief green flash confirming completion
+        targetEl.classList.add("moodlens-target-done");
+        setTimeout(
+          () => targetEl.classList.remove("moodlens-target-done"),
+          1400,
+        );
+        // Processing done — fully deactivate target mode now.
+        // User must re-press Target in popup to start a new selection.
+        deactivateTargetMode();
+        try {
+          chrome.runtime
+            .sendMessage({ type: "SET_MODE", mode: "manual" })
+            .catch(() => {});
+        } catch (_) {}
+      }
+    }
+
+    // Send each node as TARGET_REPHRASE_REQUEST with its system prompt inline.
+    // This uses an isolated session in content-main.js — completely independent
+    // of the global mood session, so it can never be wiped by a mood switch.
+    for (const node of targetNodes) {
+      const requestId = `tgt_${++requestCounter}`;
+      inflightRequests.set(requestId, node);
+      inflightNodes.add(node);
+      inflightRequestCallbacks.set(requestId, onTargetNodeDone);
+      postToMain("TARGET_REPHRASE_REQUEST", {
+        requestId,
+        text: node._moodlensOriginal,
+        systemPrompt,
+      });
+    }
+
+    broadcastProgress({ targetMode: true });
+  }
+
+  // ── Chrome runtime message listener ─────────────────────────────────────────
   chrome.runtime.onMessage.addListener((msg) => {
     console.log(`${TAG} Got message:`, msg.type);
 
@@ -842,6 +1813,14 @@
       if (popupOpen) {
         broadcastProgress();
       }
+    }
+
+    if (msg.type === "TARGET_MODE_ACTIVATE") {
+      activateTargetMode();
+    }
+
+    if (msg.type === "TARGET_MODE_DEACTIVATE") {
+      deactivateTargetMode();
     }
 
     if (msg.type === "MOOD_CHANGED") {
@@ -914,6 +1893,9 @@
   // ── Boot ───────────────────────────────────────────────────────────────────
   console.log(`${TAG} Content script loaded (ISOLATED world)`);
 
+  // Load persisted target regions for this page
+  loadTargetRegions();
+
   Promise.all([
     new Promise((resolve) => {
       try {
@@ -944,6 +1926,11 @@
     console.log(
       `${TAG} Boot — mood: "${mood}", enabled: ${enabled}, mode: ${mode}, intensity: ${intensity}, paused: ${paused}`,
     );
+
+    // If target mode was active when page loaded (e.g. popup activated it), re-engage
+    if (mode === "target") {
+      activateTargetMode();
+    }
 
     if (enabled) {
       postToMain("PING");

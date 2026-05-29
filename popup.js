@@ -492,20 +492,69 @@
   });
 
   // ── Mode Toggle ───────────────────────────────────────────────────────────
+  const targetBanner = $("target-banner");
+  const targetExitBtn = $("target-exit-btn");
+
   document.querySelectorAll(".mode-opt").forEach((btn) => {
     btn.addEventListener("click", () => {
       const newMode = btn.dataset.mode;
       if (newMode === currentMode) return;
+
+      // Exiting target mode
+      if (currentMode === "target") {
+        deactivateTargetMode();
+      }
+
       currentMode = newMode;
       updateModeUI();
-      chrome.runtime.sendMessage({ type: "SET_MODE", mode: newMode });
+
+      if (newMode === "target") {
+        activateTargetMode();
+      } else {
+        chrome.runtime.sendMessage({ type: "SET_MODE", mode: newMode });
+      }
     });
   });
+
+  function activateTargetMode() {
+    targetBanner.removeAttribute("hidden");
+    triggerBtn.setAttribute("hidden", "");
+    // Tell content script to enter target mode
+    chrome.runtime.sendMessage({ type: "SET_MODE", mode: "target" });
+    // Close popup so user can click on the page
+    // We set a flag so content.js knows to show the picker
+    chrome.runtime.sendMessage({ type: "TARGET_MODE_ACTIVATE" });
+    // Small delay then close popup so user can interact with page
+    setTimeout(() => window.close(), 350);
+  }
+
+  function deactivateTargetMode() {
+    targetBanner.setAttribute("hidden", "");
+    triggerBtn.removeAttribute("hidden");
+    chrome.runtime.sendMessage({ type: "TARGET_MODE_DEACTIVATE" });
+  }
+
+  if (targetExitBtn) {
+    targetExitBtn.addEventListener("click", () => {
+      currentMode = "manual";
+      deactivateTargetMode();
+      updateModeUI();
+      chrome.runtime.sendMessage({ type: "SET_MODE", mode: "manual" });
+    });
+  }
 
   function updateModeUI() {
     document.querySelectorAll(".mode-opt").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.mode === currentMode);
     });
+    // In target mode the Run button is hidden; banner is shown instead
+    if (currentMode === "target") {
+      triggerBtn.setAttribute("hidden", "");
+      if (targetBanner) targetBanner.removeAttribute("hidden");
+    } else {
+      triggerBtn.removeAttribute("hidden");
+      if (targetBanner) targetBanner.setAttribute("hidden", "");
+    }
   }
 
   // Manual trigger — also activates the Pause button for the first time
@@ -679,13 +728,24 @@
 
       if (msg.active && msg.pending > 0 && currentEnabled) {
         progressBar.classList.add("show");
-        if (msg.paused) {
+        if (msg.targetMode) {
+          progressText.textContent = `Target: processing ${msg.pending} nodes…`;
+        } else if (msg.paused) {
           progressText.textContent = `Paused (${msg.pending} items left)`;
         } else {
           progressText.textContent = `Processing ${msg.pending} items...`;
         }
       } else {
         progressBar.classList.remove("show");
+      }
+    }
+
+    // Target mode was exited from the page (e.g. user pressed Escape)
+    if (msg.type === "TARGET_MODE_EXITED") {
+      if (currentMode === "target") {
+        currentMode = "manual";
+        updateModeUI();
+        chrome.runtime.sendMessage({ type: "SET_MODE", mode: "manual" });
       }
     }
   });
