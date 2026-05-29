@@ -875,7 +875,7 @@
       id: "standard",
       name: "Standard",
       desc: "Clean & neutral",
-      color: "#8fa3b8",
+      color: "#e4b564",
     },
     {
       id: "cherry",

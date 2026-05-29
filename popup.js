@@ -31,7 +31,20 @@
     "linear-gradient(135deg, #38bdf8, #34d399)",
     "linear-gradient(135deg, #fbbf24, #f472b6)",
   ];
+  // ── Minimalist Instructions Toggle ────────────────────────────────────────
+  const manualTrigger = document.getElementById("manual-trigger");
+  const manualContent = document.getElementById("manual-content");
 
+  if (manualTrigger && manualContent) {
+    manualTrigger.addEventListener("click", () => {
+      const isOpen = manualTrigger.classList.toggle("open");
+      if (isOpen) {
+        manualContent.removeAttribute("hidden");
+      } else {
+        manualContent.setAttribute("hidden", "");
+      }
+    });
+  }
   // ── DOM refs ──────────────────────────────────────────────────────────────
   const $ = (sel) => document.getElementById(sel);
   const mainContent = $("main-content");
@@ -112,7 +125,9 @@
       toggle.checked = currentEnabled;
       toggle.addEventListener("change", () => {
         const en = toggle.checked;
-        document.getElementById("main-content")?.classList.toggle("disabled-overlay", !en);
+        document
+          .getElementById("main-content")
+          ?.classList.toggle("disabled-overlay", !en);
         chrome.runtime.sendMessage({ type: "SET_ENABLED", enabled: en });
       });
     }
@@ -265,7 +280,7 @@
 
   // Swatch colors matching the per-mood hue palette
   const MOOD_SWATCHES = {
-    standard: "#8fa3b8",
+    standard: "#e4b564",
     cherry: "#f06292",
     honest: "#29b6f6",
     "brutally-honest": "#ef5350",
@@ -755,38 +770,39 @@
     crashed: {
       title: "Model needs an update",
       steps: [
-        'Open <b>chrome://components</b>',
-        'Find <b>Optimization Guide On Device Model</b>',
-        'Click <b>Check for update</b>',
-        'Reload this page once updated',
+        "Open <b>chrome://components</b>",
+        "Find <b>Optimization Guide On Device Model</b>",
+        "Click <b>Check for update</b>",
+        "Reload this page once updated",
       ],
-      detail: "Gemini Nano crashed too many times — updating the model fixes this."
+      detail:
+        "Gemini Nano crashed too many times — updating the model fixes this.",
     },
     not_installed: {
       title: "Gemini Nano not set up",
       steps: [
-        'Open <b>chrome://flags/#prompt-api-for-gemini-nano</b> → Enable',
-        'Open <b>chrome://flags/#optimization-guide-on-device-model</b> → Enable BypassPerfRequirement',
-        'Relaunch Chrome',
-        'Open <b>chrome://components</b> → update Optimization Guide On Device Model',
+        "Open <b>chrome://flags/#prompt-api-for-gemini-nano</b> → Enable",
+        "Open <b>chrome://flags/#optimization-guide-on-device-model</b> → Enable BypassPerfRequirement",
+        "Relaunch Chrome",
+        "Open <b>chrome://components</b> → update Optimization Guide On Device Model",
       ],
-      detail: "One-time setup required to enable Chrome's built-in AI."
+      detail: "One-time setup required to enable Chrome's built-in AI.",
     },
     no_api: {
       title: "Prompt API not enabled",
       steps: [
-        'Open <b>chrome://flags/#prompt-api-for-gemini-nano</b>',
-        'Set to <b>Enabled</b> and relaunch Chrome',
+        "Open <b>chrome://flags/#prompt-api-for-gemini-nano</b>",
+        "Set to <b>Enabled</b> and relaunch Chrome",
       ],
-      detail: "The Prompt API flag needs to be turned on in Chrome."
+      detail: "The Prompt API flag needs to be turned on in Chrome.",
     },
     downloading: {
       title: "Model is downloading…",
       steps: [
-        'Check progress at <b>chrome://components</b>',
-        'Reload this page once the download finishes',
+        "Check progress at <b>chrome://components</b>",
+        "Reload this page once the download finishes",
       ],
-      detail: "Gemini Nano is being installed — this only happens once."
+      detail: "Gemini Nano is being installed — this only happens once.",
     },
   };
 
@@ -795,7 +811,8 @@
     const titleEl = document.getElementById("ai-banner-title");
     const stepsEl = document.getElementById("ai-banner-steps");
     if (titleEl) titleEl.textContent = msg.title;
-    if (stepsEl) stepsEl.innerHTML = msg.steps.map(s => `<li>${s}</li>`).join('');
+    if (stepsEl)
+      stepsEl.innerHTML = msg.steps.map((s) => `<li>${s}</li>`).join("");
     if (aiDetail) aiDetail.textContent = msg.detail;
     aiBanner.classList.add("show");
     dot.className = "status-dot";
@@ -807,7 +824,9 @@
     let tab;
     try {
       [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    } catch (_) { return; }
+    } catch (_) {
+      return;
+    }
     if (!tab?.id) return;
 
     let results;
@@ -817,8 +836,13 @@
         world: "MAIN",
         func: () => {
           for (const root of [window, self, globalThis]) {
-            if (root.LanguageModel || root.AILanguageModel ||
-                root.ai?.languageModel || root.ai?.assistant) return true;
+            if (
+              root.LanguageModel ||
+              root.AILanguageModel ||
+              root.ai?.languageModel ||
+              root.ai?.assistant
+            )
+              return true;
           }
           return false;
         },

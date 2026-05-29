@@ -126,7 +126,11 @@
           <div class="mode-switch">
             <button class="mode-opt" data-mode="auto">Auto</button>
             <button class="mode-opt active" data-mode="manual">Manual</button>
-            <button class="mode-opt" data-mode="target" title="Click any area on the page to apply a mood to just that section">
+            <button
+              class="mode-opt"
+              data-mode="target"
+              title="Click any area on the page to apply a mood to just that section"
+            >
               <span class="target-icon">⊕</span> Target
             </button>
           </div>
@@ -149,7 +153,13 @@
         <div class="target-banner" id="target-banner" hidden>
           <span class="target-banner-icon">⊕</span>
           <span>Target mode active — click any area on the page</span>
-          <button class="target-banner-exit" id="target-exit-btn" title="Exit target mode">✕</button>
+          <button
+            class="target-banner-exit"
+            id="target-exit-btn"
+            title="Exit target mode"
+          >
+            ✕
+          </button>
         </div>
 
         <!-- Primary CTA -->
@@ -194,6 +204,33 @@
       <span id="status-text">Ready</span>
     </div>
 
+    <div class="minimal-manual">
+      <button class="manual-trigger" id="manual-trigger">
+        <span>How to use MoodLens</span>
+        <span class="manual-chevron">↓</span>
+      </button>
+      <div class="manual-content" id="manual-content" hidden>
+        <p>
+          <strong>1. Set Tone:</strong> Pick a mood from the carousel & adjust
+          intensity.
+        </p>
+        <p>
+          <strong>2. Choose Mode:</strong> <br />
+          • <b>Manual:</b> Click Run to translate the page.<br />
+          • <b>Auto:</b> Translates seamlessly as you scroll.<br />
+          • <b>Target (⊕):</b> Click this, then click a specific paragraph to
+          isolate it.
+        </p>
+        <p>
+          <strong>3. Custom:</strong> Click <b>+</b> in the carousel to add your
+          own prompt.
+        </p>
+        <p>
+          <strong>4. Controls:</strong> Use ⏸ to pause or ↻ to reset the page
+          text.
+        </p>
+      </div>
+    </div>
     <!-- Footer -->
     <div class="footer">
       Made with
