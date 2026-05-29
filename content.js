@@ -109,13 +109,15 @@
 
   let saveCacheTimer = null;
 
-  function saveToCache(originalText, rephrasedText) {
+  function saveToCache(originalText, rephrasedText, specificMood) {
     if (!originalText || !rephrasedText) return;
     const trimOrig = originalText.trim();
     const trimReph = rephrasedText.trim();
     if (trimOrig === trimReph || trimOrig.length < MIN_CHARS) return;
 
-    const key = `${mood}_${trimOrig}`;
+    // Use the specific target mood if provided, otherwise fallback to global mood
+    const activeMood = specificMood || mood;
+    const key = `${activeMood}_${trimOrig}`;
     cacheMap[key] = trimReph;
 
     const keys = Object.keys(cacheMap);
@@ -127,15 +129,14 @@
     saveCacheTimer = setTimeout(() => {
       try {
         chrome.storage.local.set({ moodlens_cache: cacheMap });
-      } catch (err) {
-        console.warn(`${TAG} Cache save failed:`, err);
-      }
+      } catch (err) {}
     }, 3000);
   }
 
-  function getFromCache(originalText) {
+  function getFromCache(originalText, specificMood) {
     if (!originalText) return null;
-    return cacheMap[`${mood}_${originalText.trim()}`] || null;
+    const activeMood = specificMood || mood;
+    return cacheMap[`${activeMood}_${originalText.trim()}`] || null;
   }
 
   // ── PostMessage bridge to MAIN world ────────────────────────────────────────
@@ -203,12 +204,14 @@
         node.textContent = msg.text;
         processedNodes.add(node);
         inflightNodes.delete(node);
-        saveToCache(node._moodlensOriginal, msg.text);
+
+        // NEW: Tell the cache exactly which mood generated this text
+        const appliedMood = node._moodlensTargetMood || mood;
+        saveToCache(node._moodlensOriginal, msg.text, appliedMood);
       } else if (node) {
         inflightNodes.delete(node);
       }
 
-      // Target mode explicit success pass
       const cb = inflightRequestCallbacks.get(msg.requestId);
       if (cb) {
         inflightRequestCallbacks.delete(msg.requestId);
@@ -219,7 +222,6 @@
       if (pendingNodes.size > 0 && (mode === "auto" || manualRunning))
         scheduleBatch();
     }
-
     if (msg.type === "REPHRASE_FAIL") {
       const node = inflightRequests.get(msg.requestId);
       inflightRequests.delete(msg.requestId);
@@ -338,7 +340,7 @@
 
   // ── Queue / batch ──────────────────────────────────────────────────────────
   function queueNode(node) {
-    if (!enabled || paused) return;
+    if (!enabled) return;
 
     const currentText = node.textContent.trim();
     if (!currentText) return;
@@ -454,6 +456,10 @@
   // ── Restart Translation from Scratch ────────────────────────────────────────
   function restartRephrasing() {
     console.log(`${TAG} Restarting rephrasing on page...`);
+
+    // NEW: Tell the AI bridge to immediately dump all pending background tasks
+    postToMain("DESTROY_SESSION");
+
     pendingNodes.clear();
     inflightRequests.clear();
     commandInflightRequests.clear();
@@ -550,11 +556,40 @@
         },
       },
     );
-
     let n;
     while ((n = walker.nextNode())) {
-      if (inflightNodes.has(n)) continue;
-      rawNodes.push(n);
+      if (n._moodlensOriginal === undefined)
+        n._moodlensOriginal = n.textContent.trim();
+      n._moodlensTargetMood = moodId;
+
+      // NEW: Fast-path Cache Check! If we already translated this exact text
+      // into this exact mood, apply it instantly and skip the AI.
+      const cached = getFromCache(n._moodlensOriginal, moodId);
+      if (cached) {
+        n._moodlensRephrased = cached;
+        n.textContent = cached;
+        processedNodes.add(n);
+        continue;
+      }
+
+      n._moodlensRephrased = undefined;
+      targetNodes.push(n);
+    }
+
+    if (targetNodes.length === 0) {
+      // If the array is empty, it means the Cache handled 100% of the paragraph!
+      targetEl.classList.remove("moodlens-target-processing");
+      targetEl.classList.add("moodlens-target-done"); // Flash green for instant success
+      setTimeout(() => targetEl.classList.remove("moodlens-target-done"), 1400);
+
+      isTargetProcessing = false;
+      deactivateTargetMode();
+      try {
+        chrome.runtime
+          .sendMessage({ type: "SET_MODE", mode: "manual" })
+          .catch(() => {});
+      } catch (_) {}
+      return;
     }
 
     const nodes = getTargetedNodesForCommand(commandText, rawNodes);
@@ -1666,16 +1701,39 @@
         resetAndReinit(mood, customPrompt);
       }
     }
-
     if (msg.type === "PAUSED_CHANGED") {
       paused = msg.paused;
-      if (
-        !paused &&
-        (mode === "auto" || manualRunning) &&
-        pendingNodes.size > 0
-      )
-        scheduleBatch();
-      broadcastProgress();
+      if (paused) {
+        // 1. Tell the AI Bridge to instantly drop the queue
+        postToMain("DESTROY_SESSION");
+
+        // 2. Move any AI requests that were mid-flight safely back into pending
+        for (const [reqId, node] of inflightRequests.entries()) {
+          pendingNodes.add(node);
+          inflightNodes.delete(node);
+        }
+        inflightRequests.clear();
+
+        // 3. Stop running and freeze the background DOM scanners
+        manualRunning = false;
+        if (batchTimer) clearTimeout(batchTimer);
+        nodesToScan.clear();
+        if (observerStarted) {
+          observer.disconnect();
+          observerStarted = false;
+        }
+
+        // Counter is now 100% frozen
+        broadcastProgress();
+      } else {
+        // RESUME
+        startObserver(); // Wake up scanners
+        scheduleScan(document.body); // Do a fresh sweep to catch anything missed while paused
+
+        if ((mode === "auto" || manualRunning) && pendingNodes.size > 0)
+          scheduleBatch();
+        broadcastProgress();
+      }
     }
 
     if (msg.type === "RESTART_REPHRASE") restartRephrasing();
