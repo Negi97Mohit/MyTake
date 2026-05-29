@@ -9,22 +9,16 @@
   const CHANNEL = "MOODLENS_BRIDGE";
 
   // ── Single shared session ─────────────────────────────────────────────────
-  // ONE session for everything: mood rephrases, target rephrases, commands.
-  // Reusing one session avoids multiple lm.create() calls which increment
-  // Chrome's model crash counter and eventually blacklist the model.
   let sharedSession = null;
   let sessionInitializing = false;
-  let sessionDead = false; // true once we've confirmed the model is crashed
+  let sessionDead = false;
   let initAttempts = 0;
-  const MAX_INIT_ATTEMPTS = 1; // never retry create() more than once per page
+  const MAX_INIT_ATTEMPTS = 1;
 
   // ── Serial request queue ──────────────────────────────────────────────────
-  // All requests go through one queue, one at a time.
-  // No cloning, no concurrent sessions — Gemini Nano can't handle it.
   const requestQueue = [];
   let queueActive = false;
 
-  // ── Mood prompts (used inline in each prompt, not as systemPrompt) ────────
   const MOOD_PROMPTS = {
     standard: "Rephrase in clean, neutral, everyday style. Keep exact meaning.",
     cherry:
@@ -52,14 +46,11 @@
     return null;
   }
 
-  // ── Check availability without creating a session ─────────────────────────
   async function checkAvailability() {
     const lm = getAPI();
     if (!lm) return "no_api";
     try {
-      if (typeof lm.availability === "function") {
-        return await lm.availability();
-      }
+      if (typeof lm.availability === "function") return await lm.availability();
       if (typeof lm.capabilities === "function") {
         const caps = await lm.capabilities();
         return caps?.available || "unknown";
@@ -68,7 +59,6 @@
     return "unknown";
   }
 
-  // ── Trigger model update via background ──
   function triggerModelUpdate() {
     try {
       window.postMessage(
@@ -128,11 +118,7 @@
     }
 
     try {
-      console.log(
-        `${TAG} Creating shared session (single create for entire page)...`,
-      );
-
-      // FIX: Added expectedLanguage configuration parameter to bypass safety/attestation validation failures
+      console.log(`${TAG} Creating shared session...`);
       sharedSession = await lm.create({
         systemPrompt:
           "You are a text rephraser. Follow the style instruction given in each request exactly. Output ONLY the rephrased text — no preamble, no quotes, no commentary.",
@@ -194,8 +180,11 @@
       }
       return;
     }
+
     const item = requestQueue.shift();
     queueActive = true;
+
+    // Process item natively, waiting exactly as long as the model takes
     runItem(item).finally(() => {
       queueActive = false;
       drainQueue();
@@ -203,40 +192,18 @@
   }
 
   async function runItem(item) {
-    try {
-      await streamPrompt(item);
-    } catch (err) {
-      console.error(`${TAG} runItem error for ${item.requestId}:`, err.message);
-      post(`${item.typePrefix}_FAIL`, {
-        requestId: item.requestId,
-        error: err.message,
-      });
-    }
-  }
-
-  // ── Stream a single prompt through the shared session ─────────────────────
-  async function streamPrompt(item) {
     const { requestId, prompt, typePrefix } = item;
     console.log(`${TAG} Starting ${typePrefix} for ${requestId}`);
 
-    if (!sharedSession) {
+    if (!sharedSession || sessionDead) {
       post(`${typePrefix}_FAIL`, { requestId, error: "No session" });
       return;
     }
 
-    const TIMEOUT_MS = 20000;
-    let timer;
-
     try {
-      await Promise.race([
-        doStream(requestId, prompt, typePrefix),
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error("AI Request Timeout")),
-            TIMEOUT_MS,
-          );
-        }),
-      ]);
+      // Note: We removed the artificial Promise.race timeout here.
+      // We rely natively on the browser's model processing to finish.
+      await doStream(requestId, prompt, typePrefix);
     } catch (err) {
       const msg = err.message || "";
       const isFatal =
@@ -245,7 +212,9 @@
       if (isFatal) {
         console.error(`${TAG} Session fatally dead: ${msg}`);
         sharedSession = null;
-        sessionDead = true;
+        sessionDead = true; // Hard-lock the session flag
+
+        // Purge all pending requests immediately
         while (requestQueue.length > 0) {
           const qi = requestQueue.shift();
           post(`${qi.typePrefix}_FAIL`, {
@@ -260,8 +229,6 @@
         );
       }
       post(`${typePrefix}_FAIL`, { requestId, error: msg });
-    } finally {
-      clearTimeout(timer);
     }
   }
 
@@ -295,19 +262,23 @@
             error: "Empty stream output",
           });
         }
-        return;
+        return; // Success exit
       } catch (err) {
-        console.warn(
-          `${TAG} promptStreaming failed for ${requestId}: ${err.message} — trying prompt()`,
-        );
+        // STRICT GUARDRAIL: If the session was destroyed by Chrome during stream,
+        // DO NOT attempt the prompt() fallback. Throw immediately.
         if (
           err.message?.includes("destroyed") ||
           err.message?.includes("session has been destroyed")
-        )
+        ) {
           throw err;
+        }
+        console.warn(
+          `${TAG} promptStreaming failed for ${requestId}: ${err.message} — trying prompt()`,
+        );
       }
     }
 
+    // Non-streaming fallback (only triggers if streaming wasn't supported, or had a non-fatal filter error)
     try {
       const result = await sharedSession.prompt(prompt);
       const trimmed = result?.trim();
@@ -320,8 +291,9 @@
       if (
         err.message?.includes("destroyed") ||
         err.message?.includes("session has been destroyed")
-      )
+      ) {
         throw err;
+      }
       post(`${typePrefix}_FAIL`, {
         requestId,
         error: err.message || "prompt() failed",
@@ -345,13 +317,10 @@
     return `Style: ${style}\n\nRewrite the following text in that style. STRICT RULES: same approximate length, no added sentences, no preamble, no quotes. Output ONLY the rewritten text:\n\n${text}`;
   }
 
-  // ── Handlers ──────────────────────────────────────────────────────────────
+  // ── Handlers (with strict empty string validation) ────────────────────────
   function handleRephrase(requestId, text) {
     if (!text || !text.trim()) {
-      console.warn(
-        `${TAG} Aborting REPHRASE: Empty text provided for ${requestId}`,
-      );
-      post("REPHRASE_FAIL", { requestId, error: "Empty text provided" });
+      post("REPHRASE_FAIL", { requestId, error: "Empty text" });
       return;
     }
     const prompt = buildRephrasePrompt(
@@ -365,10 +334,7 @@
 
   function handleTargetRephrase(requestId, text, systemPrompt) {
     if (!text || !text.trim()) {
-      console.warn(
-        `${TAG} Aborting TARGET_REPHRASE: Empty text provided for ${requestId}`,
-      );
-      post("REPHRASE_FAIL", { requestId, error: "Empty text provided" });
+      post("REPHRASE_FAIL", { requestId, error: "Empty text" });
       return;
     }
     const prompt = buildRephrasePrompt(text, null, systemPrompt, 2);
@@ -377,17 +343,13 @@
 
   function handleCommand(requestId, text, commandText) {
     if (!text || !text.trim() || !commandText || !commandText.trim()) {
-      console.warn(
-        `${TAG} Aborting COMMAND: Empty input provided for ${requestId}`,
-      );
-      post("COMMAND_FAIL", { requestId, error: "Empty text or command" });
+      post("COMMAND_FAIL", { requestId, error: "Empty input" });
       return;
     }
     const prompt = `Command: ${commandText}\nText: "${text}"\nApply the command to the text. Output ONLY the result, no commentary:`;
     enqueue({ requestId, prompt, typePrefix: "COMMAND" });
   }
 
-  // ── PostMessage helpers ───────────────────────────────────────────────────
   function post(type, data) {
     window.postMessage(
       { channel: CHANNEL, direction: "TO_ISOLATED", type, ...data },
@@ -430,9 +392,7 @@
         break;
 
       case "DESTROY_SESSION":
-        console.log(
-          `${TAG} → DESTROY_SESSION (mood update only, session kept alive)`,
-        );
+        console.log(`${TAG} → DESTROY_SESSION`);
         requestQueue.length = 0;
         queueActive = false;
         break;
@@ -443,7 +403,6 @@
     }
   });
 
-  // ── Boot ──────────────────────────────────────────────────────────────────
   const hasAI = !!getAPI();
   console.log(`${TAG} Bridge loaded — AI present: ${hasAI}`);
   post("BRIDGE_READY", { hasAI });
