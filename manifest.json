@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "MyTake",
   "version": "2.0.0",
-  "description": "Rephrases every sentence on screen according to your chosen mood — powered by Chrome's built-in Nano AI.",
+  "description": "Your browser, Your tone/ mood — powered by Chrome's built-in Nano AI.",
   "permissions": ["storage", "scripting", "tabs"],
   "host_permissions": ["<all_urls>"],
   "background": {
