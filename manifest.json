@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "MyTake",
   "version": "2.0.0",
-  "description": "Your browser, Your tone/ mood — powered by Chrome's built-in Nano AI.",
+  "description": "Shape the web's tone to match yours — powered by Chrome's built-in Gemini Nano AI.",
   "permissions": ["storage", "scripting", "tabs"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
