@@ -1,8 +1,8 @@
-// background.js — MoodLens v2.0 service worker
+// background.js — MyTake v2.0 service worker
 // Stores mood, mode, custom moods, and saved commands.
 // Broadcasts changes to all content scripts.
 
-const DEFAULT_MOOD = "standard";
+const DEFAULT_MOOD = "original";
 const DEFAULT_MODE = "manual";
 const DEFAULT_INTENSITY = 2;
 const DEFAULT_THEME = "dark";
@@ -116,10 +116,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return true;
 
-    // ── Target mode exited (from content, forward to popup) ──────
     case "TARGET_MODE_EXITED":
-      // Broadcast so popup can update its UI
-      broadcastToAllTabs({ type: "TARGET_MODE_EXITED" });
+      // No broadcast needed — popup receives this directly via chrome.runtime.onMessage
       sendResponse({ ok: true });
       return true;
 
@@ -220,7 +218,7 @@ let updateInProgress = false;
 function triggerGeminiNanoUpdate() {
   if (updateInProgress) return;
   updateInProgress = true;
-  console.log("[MoodLens BG] Requesting Gemini Nano component update...");
+  console.log("[MyTake BG] Requesting Gemini Nano component update...");
 
   chrome.tabs.create({ url: "chrome://components", active: false }, (tab) => {
     if (!tab?.id) {
@@ -273,13 +271,13 @@ function triggerGeminiNanoUpdate() {
         })
         .then((results) => {
           console.log(
-            "[MoodLens BG] Component update result:",
+            "[MyTake BG] Component update result:",
             results?.[0]?.result,
           );
         })
         .catch((err) => {
           console.warn(
-            "[MoodLens BG] Could not click update button:",
+            "[MyTake BG] Could not click update button:",
             err.message,
           );
         })
@@ -322,7 +320,7 @@ function sendToActiveTab(message) {
 let popupPort = null;
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === "moodlens_popup") {
+  if (port.name === "mytake_popup") {
     popupPort = port;
     sendToActiveTab({ type: "POPUP_STATE", open: true });
 

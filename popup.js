@@ -1,17 +1,52 @@
-// popup.js — MoodLens v2.0 Popup Controller
-// Handles: mood grid, custom moods, auto/manual mode, AI commands
+// popup.js — MyTake v2.0 Popup Controller
+// Handles: mood grid, custom moods, manual mode, AI commands
 
 (() => {
   "use strict";
 
+  // ── Preview Mode Helper (Manifest V3 CSP compliance) ───────────────────────
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get("theme") === "light") {
+    document.body.classList.add("light-theme");
+  }
+  if (urlParams.get("preview") === "1") {
+    const moods = [
+      { id: "original", name: "Original", desc: "View original text (Off)", c: "#64748b" },
+      { id: "cherry", name: "Cherry", desc: "Warm & uplifting", c: "#f29bb0" },
+      { id: "honest", name: "Honest", desc: "Direct, no fluff", c: "#7bc4e8" },
+      { id: "brutally-honest", name: "Brutal", desc: "Blunt & straight", c: "#f08060" },
+      { id: "academic", name: "Academic", desc: "Formal & precise", c: "#9d8cf0" },
+      { id: "casual", name: "Casual", desc: "Chill & relaxed", c: "#7ad0a8" },
+      { id: "poetic", name: "Poetic", desc: "Evocative & rich", c: "#d4a3e6" }
+    ];
+    const track = document.getElementById("carousel-track");
+    if (track) {
+      track.innerHTML = "";
+      moods.forEach((m, i) => {
+        const el = document.createElement("div");
+        el.className = "carousel-item" + (i === 0 ? " selected" : "");
+        el.dataset.mood = m.id;
+        el.innerHTML = `<span class="item-swatch" style="background:${m.c}"></span><span class="item-label">${m.name}</span>`;
+        track.appendChild(el);
+      });
+      const add = document.createElement("div");
+      add.className = "carousel-item carousel-add-item";
+      add.innerHTML = `<span class="item-swatch">+</span><span class="item-label">Custom</span>`;
+      track.appendChild(add);
+    }
+    return; // Stop execution of the rest of the script to prevent chrome.* runtime errors in preview
+  }
+
   // Establish connection to background to track popup open state
   try {
-    chrome.runtime.connect({ name: "moodlens_popup" });
+    chrome.runtime.connect({ name: "mytake_popup" });
   } catch (_) {}
 
   // ── Built-in moods ────────────────────────────────────────────────────────
   const BUILTIN_MOODS = [
-    { id: "standard", name: "Standard", desc: "Clean & neutral" },
+    { id: "original", name: "Original", desc: "View original text (Off)" },
+    { id: "explain", name: "Explain", desc: "Explain like I'm 5" },
+    { id: "donald", name: "Donald", desc: "Sounds like Trump" },
     { id: "cherry", name: "Cherry", desc: "Warm & uplifting" },
     { id: "honest", name: "Honest", desc: "Direct, no fluff" },
     { id: "brutally-honest", name: "Brutal", desc: "Blunt & straight" },
@@ -53,8 +88,7 @@
   const statusTx = $("status-text");
   const progressBar = $("progress-bar");
   const progressText = $("progress-text");
-  const aiBanner = $("ai-banner");
-  const aiDetail = $("ai-detail");
+  const disclaimerOverlay = $("disclaimer-overlay");
 
   // Apple Health Globe & Carousel
   const carouselTrack = $("carousel-track");
@@ -88,7 +122,7 @@
   const customDesc = $("custom-mood-desc");
 
   // ── State ─────────────────────────────────────────────────────────────────
-  let currentMood = "standard";
+  let currentMood = "original";
   let currentEnabled = true;
   let currentMode = "manual";
   let customMoods = [];
@@ -97,17 +131,19 @@
   let currentTheme = "dark";
   let currentPaused = false;
   let runStarted = false; // tracks if Run was ever pressed this session
+  let aiAvailable = true;
+  let aiErrorCode = null;
 
   // ── Load state ────────────────────────────────────────────────────────────
   chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
     if (chrome.runtime.lastError) {
       console.error(
-        "[MoodLens popup] GET_STATE error:",
+        "[MyTake popup] GET_STATE error:",
         chrome.runtime.lastError,
       );
       return;
     }
-    currentMood = state.mood || "standard";
+    currentMood = state.mood || "original";
     currentEnabled = state.enabled !== false;
     currentMode = state.mode || "manual";
     customMoods = state.customMoods || [];
@@ -220,7 +256,9 @@
 
   // ── Mood Carousel & Globe ──────────────────────────────────────────────────
   const MOOD_GRADIENTS = {
-    standard: "linear-gradient(135deg, #7a8fa6, #b0bec5)" /* steel slate */,
+    original: "linear-gradient(135deg, #94a3b8, #64748b)",
+    explain: "linear-gradient(135deg, #81c784, #aed581)",
+    donald: "linear-gradient(135deg, #ffb74d, #ff8a65)",
     cherry: "linear-gradient(135deg, #f06292, #ff8a65)" /* cherry blossom */,
     honest: "linear-gradient(135deg, #29b6f6, #80deea)" /* arctic blue */,
     "brutally-honest":
@@ -231,7 +269,9 @@
   };
 
   const MOOD_SHADOWS = {
-    standard: "rgba(122, 143, 166, 0.35)",
+    original: "rgba(100, 116, 139, 0.35)",
+    explain: "rgba(129, 199, 132, 0.35)",
+    donald: "rgba(255, 183, 77, 0.35)",
     cherry: "rgba(240, 98, 146, 0.5)",
     honest: "rgba(41, 182, 246, 0.45)",
     "brutally-honest": "rgba(239, 83, 80, 0.55)",
@@ -254,17 +294,17 @@
 
     globeSphere.style.setProperty(
       "--custom-gradient",
-      gradient || MOOD_GRADIENTS.standard,
+      gradient || MOOD_GRADIENTS.original,
     );
     globeSphere.style.setProperty(
       "--globe-shadow",
-      shadow || MOOD_SHADOWS.standard,
+      shadow || MOOD_SHADOWS.original,
     );
 
     if (globeHue) {
       globeHue.style.setProperty(
         "--custom-gradient",
-        gradient || MOOD_GRADIENTS.standard,
+        gradient || MOOD_GRADIENTS.original,
       );
     }
 
@@ -280,7 +320,9 @@
 
   // Swatch colors matching the per-mood hue palette
   const MOOD_SWATCHES = {
-    standard: "#e4b564",
+    original: "#64748b",
+    explain: "#81c784",
+    donald: "#ffb74d",
     cherry: "#f06292",
     honest: "#29b6f6",
     "brutally-honest": "#ef5350",
@@ -376,6 +418,12 @@
     if (mood.id === currentMood) return;
     currentMood = mood.id;
 
+    if (currentMood === "original" && currentMode !== "manual") {
+      currentMode = "manual";
+      deactivateTargetMode();
+      chrome.runtime.sendMessage({ type: "SET_MODE", mode: "manual" });
+    }
+
     // Set body data-mood so CSS per-mood hues activate
     document.body.dataset.mood = mood.id;
     document.documentElement.dataset.mood = mood.id;
@@ -392,6 +440,7 @@
 
     syncCarouselSelection();
     updateStatus();
+    updateModeUI();
 
     const msg = { type: "SET_MOOD", mood: mood.id };
     if (isCustom && mood.prompt) {
@@ -456,9 +505,9 @@
     chrome.runtime.sendMessage({ type: "DELETE_CUSTOM_MOOD", id }, () => {
       customMoods = customMoods.filter((m) => m.id !== id);
       if (currentMood === id) {
-        currentMood = "standard";
-        chrome.runtime.sendMessage({ type: "SET_MOOD", mood: "standard" });
-        updateStatus();
+        currentMood = "original";
+        chrome.runtime.sendMessage({ type: "SET_MOOD", mood: "original" });
+        syncCarouselSelection();
       }
       renderCarousel();
     });
@@ -471,11 +520,7 @@
    * pauseBtn is disabled until Run has been clicked at least once.
    */
   function updatePauseResumeUI() {
-    if (currentMode === "auto") {
-      pauseBtn.disabled = false;
-    } else {
-      pauseBtn.disabled = !(runStarted || currentPaused);
-    }
+    pauseBtn.disabled = !(runStarted || currentPaused);
 
     if (currentPaused) {
       pauseBtn.classList.add("paused-state");
@@ -559,8 +604,15 @@
   }
 
   function updateModeUI() {
+    const isModeDisabled = (currentMood === "original" || !aiAvailable);
+    const modeSwitch = document.querySelector(".mode-switch");
+    if (modeSwitch) {
+      modeSwitch.classList.toggle("disabled", isModeDisabled);
+    }
+
     document.querySelectorAll(".mode-opt").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.mode === currentMode);
+      btn.disabled = isModeDisabled;
     });
     // In target mode the Run button is hidden; banner is shown instead
     if (currentMode === "target") {
@@ -569,6 +621,21 @@
     } else {
       triggerBtn.removeAttribute("hidden");
       if (targetBanner) targetBanner.setAttribute("hidden", "");
+    }
+    
+    const isAiBlocked = !aiAvailable;
+    if (isAiBlocked) {
+      triggerBtn.disabled = true;
+      triggerBtn.textContent = aiErrorCode === "downloading" ? "Downloading AI..." : "AI Unavailable";
+      triggerBtn.title = aiErrorCode === "downloading" ? "Waiting for Gemini Nano download to complete..." : "Chrome built-in AI is not ready or failed to load.";
+    } else if (currentMood === "original") {
+      triggerBtn.disabled = true;
+      triggerBtn.textContent = "Turned Off";
+      triggerBtn.title = "Select a mood to rephrase text";
+    } else {
+      triggerBtn.disabled = false;
+      triggerBtn.textContent = "Run";
+      triggerBtn.title = "";
     }
   }
 
@@ -709,7 +776,7 @@
   function updateStatus() {
     if (!currentEnabled) {
       dot.className = "status-dot";
-      statusTx.textContent = "MoodLens paused";
+      statusTx.textContent = "MyTake paused";
       return;
     }
     dot.className = "status-dot active";
@@ -717,7 +784,7 @@
       BUILTIN_MOODS.find((m) => m.id === currentMood) ||
       customMoods.find((m) => m.id === currentMood);
     const moodName = moodData ? moodData.name : currentMood;
-    const modeLabel = currentMode === "auto" ? "Auto" : "Manual";
+    const modeLabel = "Manual";
     statusTx.textContent = `Active · ${moodName} · ${modeLabel}`;
   }
 
@@ -725,12 +792,24 @@
   chrome.runtime.onMessage.addListener((msg) => {
     // AI_STATUS is forwarded from content.js via background when AI session fails
     if (msg.type === "AI_STATUS_UPDATE") {
+      aiAvailable = msg.available;
+      aiErrorCode = msg.error;
       if (!msg.available && msg.error) {
-        showAiBanner(msg.error);
+        showAiDisclaimer(msg.error);
       } else if (msg.available) {
-        aiBanner.classList.remove("show");
-        updateStatus();
+        hideAiDisclaimer();
       }
+    }
+
+    if (msg.type === "DOWNLOAD_PROGRESS") {
+      const pct = Math.round((msg.loaded / msg.total) * 100) || 0;
+      const detailEl = document.getElementById("disclaimer-detail");
+      if (detailEl) {
+        detailEl.innerHTML = `Downloading Gemini Nano: <b>${pct}%</b> (${(msg.loaded / 1024 / 1024).toFixed(1)} MB / ${(msg.total / 1024 / 1024).toFixed(1)} MB)<br><span style="font-size: 9.5px; opacity: 0.7; display: block; margin-top: 4px;">Keep Chrome open and this tab active. The modal will close automatically when the download finishes.</span>`;
+      }
+      statusTx.textContent = `Downloading AI: ${pct}%`;
+      progressBar.classList.add("show");
+      progressText.textContent = `Downloading on-device AI: ${pct}%...`;
     }
 
     if (msg.type === "PROGRESS_UPDATE") {
@@ -750,7 +829,7 @@
         } else {
           progressText.textContent = `Processing ${msg.pending} items...`;
         }
-      } else {
+      } else if (aiErrorCode !== "downloading") {
         progressBar.classList.remove("show");
       }
     }
@@ -765,58 +844,88 @@
     }
   });
 
-  // ── AI error banner — called by content-main.js error codes ─────────────
+  // ── AI error messages ───────────────────────────────────────────────────
   const BANNER_MESSAGES = {
     crashed: {
       title: "Model needs an update",
       steps: [
         "Open <b>chrome://components</b>",
         "Find <b>Optimization Guide On Device Model</b>",
-        "Click <b>Check for update</b>",
+        "Click <b>Check for update</b> to force-restart the model",
         "Reload this page once updated",
       ],
       detail:
         "Gemini Nano crashed too many times — updating the model fixes this.",
     },
     not_installed: {
-      title: "Gemini Nano not set up",
+      title: "On-Device AI Setup Required",
       steps: [
-        "Open <b>chrome://flags/#prompt-api-for-gemini-nano</b> → Enable",
-        "Open <b>chrome://flags/#optimization-guide-on-device-model</b> → Enable BypassPerfRequirement",
-        "Relaunch Chrome",
-        "Open <b>chrome://components</b> → update Optimization Guide On Device Model",
+        "Check that you have at least <b>22 GB of free disk space</b>",
+        "Ensure <b>Hardware Acceleration</b> is enabled in Chrome Settings",
+        "Check status at <b>chrome://on-device-internals</b>",
       ],
-      detail: "One-time setup required to enable Chrome's built-in AI.",
+      detail: "Chrome's Gemini Nano model has not downloaded yet.",
     },
     no_api: {
-      title: "Prompt API not enabled",
+      title: "Prompt API unavailable",
       steps: [
-        "Open <b>chrome://flags/#prompt-api-for-gemini-nano</b>",
-        "Set to <b>Enabled</b> and relaunch Chrome",
+        "Ensure you are using <b>Chrome 148 or newer</b>",
+        "If disabled by policy, try a personal browser profile",
+        "Visit <b>chrome://flags/#prompt-api-for-gemini-nano</b> to override if needed",
       ],
-      detail: "The Prompt API flag needs to be turned on in Chrome.",
+      detail: "The Prompt API is not supported on this device/browser version.",
     },
     downloading: {
-      title: "Model is downloading…",
+      title: "Downloading local AI model...",
       steps: [
-        "Check progress at <b>chrome://components</b>",
-        "Reload this page once the download finishes",
+        "Check progress in the progress bar below",
+        "Or check <b>chrome://components</b> (Optimization Guide component)",
+        "Keep Chrome open and running while download completes",
       ],
-      detail: "Gemini Nano is being installed — this only happens once.",
+      detail: "Gemini Nano is downloading in the background. Please wait...",
     },
   };
 
-  function showAiBanner(errorCode) {
+  function showAiDisclaimer(errorCode) {
+    aiAvailable = false;
+    aiErrorCode = errorCode;
+
     const msg = BANNER_MESSAGES[errorCode] || BANNER_MESSAGES.not_installed;
-    const titleEl = document.getElementById("ai-banner-title");
-    const stepsEl = document.getElementById("ai-banner-steps");
+    const titleEl = document.getElementById("disclaimer-title");
+    const stepsEl = document.getElementById("disclaimer-steps");
+    const detailEl = document.getElementById("disclaimer-detail");
+    const troubleshootEl = document.getElementById("disclaimer-troubleshooting");
+
     if (titleEl) titleEl.textContent = msg.title;
     if (stepsEl)
       stepsEl.innerHTML = msg.steps.map((s) => `<li>${s}</li>`).join("");
-    if (aiDetail) aiDetail.textContent = msg.detail;
-    aiBanner.classList.add("show");
+    if (detailEl) {
+      if (errorCode !== "downloading") {
+        detailEl.textContent = msg.detail;
+      }
+    }
+
+    if (troubleshootEl) {
+      if (errorCode === "downloading") {
+        troubleshootEl.style.display = "none";
+      } else {
+        troubleshootEl.style.display = "block";
+      }
+    }
+
+    disclaimerOverlay.classList.add("show");
     dot.className = "status-dot";
     statusTx.textContent = msg.title;
+
+    updateModeUI();
+  }
+
+  function hideAiDisclaimer() {
+    aiAvailable = true;
+    aiErrorCode = null;
+    disclaimerOverlay.classList.remove("show");
+    updateStatus();
+    updateModeUI();
   }
 
   // ── AI probe — lightweight, just checks if API exists on active tab ───────
@@ -829,10 +938,32 @@
     }
     if (!tab?.id) return;
 
+    try {
+      chrome.tabs.sendMessage(tab.id, { type: "GET_AI_STATUS" }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          probeViaScriptInjection(tab.id);
+          return;
+        }
+
+        aiAvailable = response.available;
+        aiErrorCode = response.error;
+
+        if (!response.available && response.error) {
+          showAiDisclaimer(response.error);
+        } else if (response.available) {
+          hideAiDisclaimer();
+        }
+      });
+    } catch (_) {
+      probeViaScriptInjection(tab.id);
+    }
+  }
+
+  async function probeViaScriptInjection(tabId) {
     let results;
     try {
       results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId },
         world: "MAIN",
         func: () => {
           for (const root of [window, self, globalThis]) {
@@ -848,18 +979,15 @@
         },
       });
     } catch (_) {
-      // Can't inject (chrome://, PDF, etc.) — don't show banner, not an error
-      aiBanner.classList.remove("show");
-      updateStatus();
+      hideAiDisclaimer();
       return;
     }
 
     const hasAPI = results?.[0]?.result === true;
     if (hasAPI) {
-      aiBanner.classList.remove("show");
-      updateStatus();
+      hideAiDisclaimer();
     } else {
-      showAiBanner("no_api");
+      showAiDisclaimer("no_api");
     }
   }
 })();

@@ -1,12 +1,12 @@
-// content-main.js — MoodLens v2.0 AI Bridge (MAIN world)
+// content-main.js — MyTake v2.0 AI Bridge (MAIN world)
 // Accesses window.LanguageModel / window.ai for AI operations.
 // Single shared session for all rephrasing — mood style goes into each prompt,
 // never into the systemPrompt. This means exactly ONE lm.create() per page load.
 
 (() => {
   "use strict";
-  const TAG = "[MoodLens-AI]";
-  const CHANNEL = "MOODLENS_BRIDGE";
+  const TAG = "[MyTake-AI]";
+  const CHANNEL = "MYTAKE_BRIDGE";
 
   // ── Single shared session ─────────────────────────────────────────────────
   let sharedSession = null;
@@ -20,7 +20,10 @@
   let queueActive = false;
 
   const MOOD_PROMPTS = {
-    standard: "Rephrase in clean, neutral, everyday style. Keep exact meaning.",
+    explain:
+      "Explain this in very simple terms, like I am 5 years old. Break down complex concepts into basic ideas.",
+    donald:
+      "Rephrase this in the speaking style of Donald J. Trump. Use his characteristic speech patterns, repetition, superlatives, and exclamations.",
     cherry:
       "Rephrase in a warm, cheerful, uplifting tone — like a good friend sharing great news. Add brightness without changing facts.",
     honest:
@@ -117,15 +120,77 @@
       return false;
     }
 
+    if (availability === "after-download") {
+      console.log(
+        `${TAG} Model requires download. Propagating downloading status.`,
+      );
+      post("AI_STATUS", { available: false, error: "downloading" });
+    }
+
     try {
       console.log(`${TAG} Creating shared session...`);
-      sharedSession = await lm.create({
-        systemPrompt:
-          "You are a text rephraser. Follow the style instruction given in each request exactly. Output ONLY the rephrased text — no preamble, no quotes, no commentary.",
-        temperature: 0.6,
-        topK: 40,
-        expectedLanguage: "en",
-      });
+      const monitorCallback = (m) => {
+        m.addEventListener("downloadprogress", (e) => {
+          console.log(`${TAG} Download progress: ${e.loaded}/${e.total}`);
+          post("DOWNLOAD_PROGRESS", { loaded: e.loaded, total: e.total });
+        });
+      };
+
+      const systemPrompt =
+        "You are a text rephraser. Follow the style instruction given in each request exactly. Output ONLY the rephrased text — no preamble, no quotes, no commentary.";
+
+      const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+      const withTimeout = (promise, ms, desc) => {
+        let timeoutId;
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new Error(`${desc} timed out after ${ms}ms`));
+          }, ms);
+        });
+        return Promise.race([
+          promise.finally(() => clearTimeout(timeoutId)),
+          timeoutPromise,
+        ]);
+      };
+
+      try {
+        sharedSession = await withTimeout(
+          lm.create({
+            systemPrompt: systemPrompt,
+            temperature: 0.6,
+            topK: 40,
+            expectedLanguage: "en",
+            monitor: monitorCallback,
+          }),
+          SESSION_TIMEOUT_MS,
+          "Standard create",
+        );
+      } catch (err) {
+        console.warn(
+          `${TAG} Standard create failed, trying fallback configurations:`,
+          err.message,
+        );
+        try {
+          sharedSession = await withTimeout(
+            lm.create({
+              systemPrompt: systemPrompt,
+              monitor: monitorCallback,
+            }),
+            SESSION_TIMEOUT_MS,
+            "Fallback create",
+          );
+        } catch (err2) {
+          console.warn(
+            `${TAG} Fallback with systemPrompt + monitor failed, trying empty/simple create:`,
+            err2.message,
+          );
+          sharedSession = await withTimeout(
+            lm.create(),
+            SESSION_TIMEOUT_MS,
+            "Simple create",
+          );
+        }
+      }
 
       console.log(`${TAG} ✅ Shared session ready`);
       sessionInitializing = false;
@@ -302,13 +367,13 @@
   }
 
   // ── Build a prompt for mood rephrasing ────────────────────────────────────
-  let currentMood = "standard";
+  let currentMood = "original";
   let currentCustomPrompt = null;
   let currentIntensity = 2;
 
   function buildRephrasePrompt(text, moodKey, customPromptStr, intensity) {
     let style =
-      customPromptStr || MOOD_PROMPTS[moodKey] || MOOD_PROMPTS.standard;
+      customPromptStr || MOOD_PROMPTS[moodKey] || MOOD_PROMPTS.explain;
     if (intensity === 1)
       style += " Be extremely subtle — change only 2–3 words max.";
     else if (intensity === 3)
@@ -368,7 +433,7 @@
         console.log(
           `${TAG} → INIT_SESSION (${msg.mood}, intensity: ${msg.intensity})`,
         );
-        currentMood = msg.mood || "standard";
+        currentMood = msg.mood || "original";
         currentCustomPrompt = msg.customPrompt || null;
         currentIntensity = msg.intensity || 2;
         if (sharedSession) {
@@ -419,6 +484,8 @@
       } else if (status === "no") {
         sessionDead = true;
         post("AI_STATUS", { available: false, error: "not_installed" });
+      } else if (status === "after-download") {
+        post("AI_STATUS", { available: false, error: "downloading" });
       }
     });
   }

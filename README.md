@@ -33,10 +33,10 @@ Switch the mood on any article, news page, or documentation and read it in the v
 
 | Feature | Description |
 |---|---|
-| **7 built-in moods** | Standard · Cherry · Honest · Brutally Honest · Academic · Casual · Poetic |
+| **9 built-in moods** | Original · Explain · Donald · Cherry · Honest · Brutally Honest · Academic · Casual · Poetic |
 | **Custom moods** | Create unlimited moods with a name and a freeform style description |
 | **Intensity slider** | Three levels — Subtle, Moderate, Extreme — tune how dramatically text is transformed |
-| **Auto / Manual mode** | Auto continuously rewrites new text as the page loads; Manual triggers on demand |
+| **Manual mode** | Manually trigger AI to rewrite the text on demand |
 | **Pause & Restart** | Pause mid-run without losing progress; Restart wipes rephrased text and starts fresh |
 | **Translation cache** | Up to 2,000 rephrasings are cached locally so switching back to a mood is instant |
 | **Dark & Light theme** | Toggle between themes from the popup header |
@@ -157,7 +157,9 @@ MyTake/
 
 | Mood | Tone | Style |
 |---|---|---|
-| **Standard** | Neutral | Clean, everyday language with exact meaning preserved |
+| **Original** | Off | View original text without AI processing |
+| **Explain** | Simple | Break down complex concepts into basic ideas like I'm 5 years old |
+| **Donald** | Trump | Speaking style of Donald J. Trump |
 | **Cherry** | Warm & uplifting | Like a good friend sharing great news — bright without changing facts |
 | **Honest** | Direct, no fluff | Jargon cut, meaning stated plainly |
 | **Brutally Honest** | Blunt | All softening language stripped — says it straight |

@@ -4,24 +4,35 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MyTake</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body data-mood="standard">
+  <body data-mood="original">
     <!-- Soft ambient gradient that shifts with mood -->
     <div class="ambient" aria-hidden="true"></div>
 
-    <!-- AI Banner — hidden by default, shown only when AI is unavailable -->
-    <div class="ai-banner" id="ai-banner">
-      <div class="ai-banner-title" id="ai-banner-title">
-        Chrome AI Unavailable
+    <!-- AI Onboarding / Disclaimer Overlay — covers the entire popup if Gemini Nano is not ready -->
+    <div class="disclaimer-overlay" id="disclaimer-overlay">
+      <div class="disclaimer-content">
+        <h1 class="disclaimer-title" id="disclaimer-title">Chrome AI Setup Required</h1>
+        <ol class="disclaimer-steps" id="disclaimer-steps">
+          <li>Checking system configuration...</li>
+        </ol>
+        <div class="disclaimer-detail" id="disclaimer-detail"></div>
+        <details class="disclaimer-troubleshooting" id="disclaimer-troubleshooting">
+          <summary>Hardware & WebGPU Troubleshooting</summary>
+          <div>
+            <p style="margin-top: 6px; line-height: 1.4; font-size: 10.5px;">If you meet requirements but still see errors, verify:</p>
+            <ol style="margin-top: 4px; padding-left: 14px; font-size: 10.5px;">
+              <li style="margin-bottom: 2px;">Turn on <b>graphics acceleration</b> in Chrome Settings (under System).</li>
+              <li style="margin-bottom: 2px;">Enable WebGPU override in <b>chrome://flags/#enable-unsafe-webgpu</b>.</li>
+              <li>Verify support at <a href="https://webgpureport.org" target="_blank" style="color: inherit; text-decoration: underline;">webgpureport.org</a>.</li>
+            </ol>
+          </div>
+        </details>
       </div>
-      <ol class="ai-banner-steps" id="ai-banner-steps">
-        <li>Open <b>chrome://flags</b></li>
-        <li>Enable <b>Prompt API for Gemini Nano</b></li>
-        <li>Enable <b>Optimization Guide On Device Model</b></li>
-        <li>Relaunch Chrome</li>
-      </ol>
-      <div class="ai-detail" id="ai-detail"></div>
     </div>
 
     <!-- Hidden tabs (popup.js still references them) -->
@@ -100,8 +111,8 @@
 
         <!-- Mood name + desc -->
         <div class="mood-meta">
-          <div class="globe-label" id="globe-label">Standard</div>
-          <div class="globe-desc" id="globe-desc">Clean &amp; neutral</div>
+          <div class="globe-label" id="globe-label">Original</div>
+          <div class="globe-desc" id="globe-desc">View original text (Off)</div>
         </div>
 
         <!-- Mood pill chips (carousel container repurposed) -->
@@ -124,7 +135,6 @@
         <!-- Mode pill (compact) -->
         <div class="mode-row">
           <div class="mode-switch">
-            <button class="mode-opt" data-mode="auto">Auto</button>
             <button class="mode-opt active" data-mode="manual">Manual</button>
             <button
               class="mode-opt"
@@ -288,81 +298,6 @@
       </div>
     </div>
 
-    <script>
-      (function () {
-        try {
-          var p = new URLSearchParams(location.search);
-          if (p.get("theme") === "light")
-            document.body.classList.add("light-theme");
-          if (p.get("preview") !== "1") return;
-          var moods = [
-            {
-              id: "standard",
-              name: "Standard",
-              desc: "Clean & neutral",
-              c: "#c9b48a",
-            },
-            {
-              id: "cherry",
-              name: "Cherry",
-              desc: "Warm & uplifting",
-              c: "#f29bb0",
-            },
-            {
-              id: "honest",
-              name: "Honest",
-              desc: "Direct, no fluff",
-              c: "#7bc4e8",
-            },
-            {
-              id: "brutally-honest",
-              name: "Brutal",
-              desc: "Blunt & straight",
-              c: "#f08060",
-            },
-            {
-              id: "academic",
-              name: "Academic",
-              desc: "Formal & precise",
-              c: "#9d8cf0",
-            },
-            {
-              id: "casual",
-              name: "Casual",
-              desc: "Chill & relaxed",
-              c: "#7ad0a8",
-            },
-            {
-              id: "poetic",
-              name: "Poetic",
-              desc: "Evocative & rich",
-              c: "#d4a3e6",
-            },
-          ];
-          var track = document.getElementById("carousel-track");
-          moods.forEach(function (m, i) {
-            var el = document.createElement("div");
-            el.className = "carousel-item" + (i === 0 ? " selected" : "");
-            el.dataset.mood = m.id;
-            el.innerHTML =
-              '<span class="item-swatch" style="background:' +
-              m.c +
-              '"></span><span class="item-label">' +
-              m.name +
-              "</span>";
-            track.appendChild(el);
-          });
-          var add = document.createElement("div");
-          add.className = "carousel-item carousel-add-item";
-          add.innerHTML =
-            '<span class="item-swatch">+</span><span class="item-label">Custom</span>';
-          track.appendChild(add);
-          var s = document.querySelector("script[data-popup-js]");
-          if (s) s.remove();
-        } catch (e) {}
-      })();
-    </script>
-    <script src="chrome-stub.js"></script>
     <script src="popup.js" data-popup-js onerror="this.remove()"></script>
   </body>
 </html>

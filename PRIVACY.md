@@ -38,7 +38,7 @@ The following data is stored exclusively in `chrome.storage.local`, which is sco
 | `enabled` / `paused` | Extension on/off state | ~10 bytes |
 | `custom_moods` | User-created mood presets | Variable |
 | `saved_commands` | User-saved AI command shortcuts | Variable |
-| `moodlens_cache` | Cached AI rephrasings (up to 2,000 entries) | ≤ ~1 MB |
+| `mytake_cache` | Cached AI rephrasings (up to 2,000 entries) | ≤ ~1 MB |
 
 The rephrasing cache stores original text snippets alongside their AI-rephrased equivalents **locally** to avoid redundant processing. This cache is never read by the developer and never leaves your machine. You can clear it at any time by clearing the extension's storage via `chrome://extensions`.
 

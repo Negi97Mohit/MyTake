@@ -1,10 +1,10 @@
-// content.js — MoodLens v2.0 ISOLATED world content script
-// Handles: mood rephrasing (auto/manual), AI commands, DOM scanning,
+// content.js — MyTake v2.0 ISOLATED world content script
+// Handles: mood rephrasing (manual), AI commands, DOM scanning,
 // MutationObserver, local caching, and streaming text updates.
 
 (() => {
-  const TAG = "[MoodLens]";
-  const CHANNEL = "MOODLENS_BRIDGE";
+  const TAG = "[MyTake]";
+  const CHANNEL = "MYTAKE_BRIDGE";
 
   // ── Config ──────────────────────────────────────────────────────────────────
   const MIN_CHARS = 5;
@@ -34,11 +34,12 @@
   ]);
 
   // ── State ───────────────────────────────────────────────────────────────────
-  let mood = "standard";
+  let mood = "original";
   let customPrompt = null;
   let enabled = true;
-  let mode = "manual"; // 'auto' | 'manual' | 'target'
+  let mode = "manual"; // 'manual' | 'target'
   let aiReady = false;
+  let aiError = null;
   let pendingNodes = new Set();
   let batchTimer = null;
   let processedNodes = new WeakSet();
@@ -60,15 +61,14 @@
       for (const entry of entries) {
         if (entry.isIntersecting) {
           const parent = entry.target;
-          if (parent._moodlensTextNodes) {
-            for (const n of parent._moodlensTextNodes) {
+          if (parent._mytakeTextNodes) {
+            for (const n of parent._mytakeTextNodes) {
               if (n.isConnected && n.textContent.trim()) {
                 pendingNodes.add(n);
               }
             }
-            if (parent._moodlensTextNodes.size > 0 && mode === "auto")
-              scheduleBatch();
-            parent._moodlensTextNodes.clear();
+            // Auto mode removed
+            parent._mytakeTextNodes.clear();
           }
           viewportObserver.unobserve(parent);
         }
@@ -91,9 +91,9 @@
   function loadCache() {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.get(["moodlens_cache"], (res) => {
-          if (res && res.moodlens_cache) {
-            cacheMap = res.moodlens_cache;
+        chrome.storage.local.get(["mytake_cache"], (res) => {
+          if (res && res.mytake_cache) {
+            cacheMap = res.mytake_cache;
             console.log(
               `${TAG} Loaded ${Object.keys(cacheMap).length} cached translations.`,
             );
@@ -128,7 +128,7 @@
     if (saveCacheTimer) clearTimeout(saveCacheTimer);
     saveCacheTimer = setTimeout(() => {
       try {
-        chrome.storage.local.set({ moodlens_cache: cacheMap });
+        chrome.storage.local.set({ mytake_cache: cacheMap });
       } catch (err) {}
     }, 3000);
   }
@@ -169,28 +169,49 @@
         initSession();
       } else if (!msg.hasAI) {
         aiReady = false;
+        aiError = "no_api";
         console.warn(`${TAG} No AI API available.`);
       }
     }
 
     if (msg.type === "AI_STATUS") {
+      aiError = msg.error || null;
       if (msg.available) {
         aiReady = true;
         console.log(`${TAG} ✅ AI session ready for mood: "${msg.mood}"`);
-        scheduleScan(document.body);
-        if (mode === "auto") scheduleBatch();
+        if (mood !== "original") {
+          scheduleScan(document.body);
+        }
         startObserver();
       } else {
         aiReady = false;
         console.error(`${TAG} ❌ AI unavailable: ${msg.error}`);
       }
+      try {
+        chrome.runtime.sendMessage({
+          type: "AI_STATUS_UPDATE",
+          available: msg.available,
+          error: msg.error,
+          mood: msg.mood
+        }).catch(() => {});
+      } catch (_) {}
+    }
+
+    if (msg.type === "DOWNLOAD_PROGRESS") {
+      try {
+        chrome.runtime.sendMessage({
+          type: "DOWNLOAD_PROGRESS",
+          loaded: msg.loaded,
+          total: msg.total
+        }).catch(() => {});
+      } catch (_) {}
     }
 
     // ── Mood rephrase streaming ─────────────────────────────────────────────
     if (msg.type === "REPHRASE_STREAM") {
       const node = inflightRequests.get(msg.requestId);
       if (node && node.isConnected) {
-        node._moodlensRephrased = msg.text;
+        node._mytakeRephrased = msg.text;
         node.textContent = msg.text;
       }
     }
@@ -200,14 +221,14 @@
       inflightRequests.delete(msg.requestId);
 
       if (node && node.isConnected) {
-        node._moodlensRephrased = msg.text;
+        node._mytakeRephrased = msg.text;
         node.textContent = msg.text;
         processedNodes.add(node);
         inflightNodes.delete(node);
 
         // NEW: Tell the cache exactly which mood generated this text
-        const appliedMood = node._moodlensTargetMood || mood;
-        saveToCache(node._moodlensOriginal, msg.text, appliedMood);
+        const appliedMood = node._mytakeTargetMood || mood;
+        saveToCache(node._mytakeOriginal, msg.text, appliedMood);
       } else if (node) {
         inflightNodes.delete(node);
       }
@@ -219,7 +240,7 @@
       }
 
       broadcastProgress();
-      if (pendingNodes.size > 0 && (mode === "auto" || manualRunning))
+      if (pendingNodes.size > 0 && manualRunning)
         scheduleBatch();
     }
     if (msg.type === "REPHRASE_FAIL") {
@@ -228,10 +249,10 @@
 
       if (node) {
         inflightNodes.delete(node);
-        if (node.isConnected && node._moodlensOriginal) {
-          node._moodlensRephrased = node._moodlensOriginal;
-          node.textContent = node._moodlensOriginal;
-          node._moodlensRephrased = undefined;
+        if (node.isConnected && node._mytakeOriginal) {
+          node._mytakeRephrased = node._mytakeOriginal;
+          node.textContent = node._mytakeOriginal;
+          node._mytakeRephrased = undefined;
         }
       }
 
@@ -243,7 +264,7 @@
       }
 
       broadcastProgress();
-      if (pendingNodes.size > 0 && (mode === "auto" || manualRunning))
+      if (pendingNodes.size > 0 && manualRunning)
         scheduleBatch();
     }
 
@@ -251,7 +272,7 @@
     if (msg.type === "COMMAND_STREAM") {
       const entry = commandInflightRequests.get(msg.requestId);
       if (entry && entry.node && entry.node.isConnected) {
-        entry.node._moodlensRephrased = msg.text;
+        entry.node._mytakeRephrased = msg.text;
         entry.node.textContent = msg.text;
       }
     }
@@ -261,7 +282,7 @@
       commandInflightRequests.delete(msg.requestId);
 
       if (entry && entry.node && entry.node.isConnected) {
-        entry.node._moodlensRephrased = msg.text;
+        entry.node._mytakeRephrased = msg.text;
         entry.node.textContent = msg.text;
         processedNodes.add(entry.node);
         inflightNodes.delete(entry.node);
@@ -278,9 +299,9 @@
       if (entry && entry.node) {
         inflightNodes.delete(entry.node);
         if (entry.node.isConnected && entry.originalText) {
-          entry.node._moodlensRephrased = entry.originalText;
+          entry.node._mytakeRephrased = entry.originalText;
           entry.node.textContent = entry.originalText;
-          entry.node._moodlensRephrased = undefined;
+          entry.node._mytakeRephrased = undefined;
         }
       }
 
@@ -291,8 +312,8 @@
 
   // ── Session management ──────────────────────────────────────────────────────
   function initSession() {
-    if (mood === "standard") {
-      console.log(`${TAG} Standard mood. Bypassing AI session.`);
+    if (mood === "original") {
+      console.log(`${TAG} Original mood. Bypassing AI session.`);
       aiReady = true;
       scheduleScan(document.body);
       startObserver();
@@ -318,8 +339,6 @@
     if (!popupOpen) return;
     try {
       const active =
-        (mode === "auto" &&
-          (pendingNodes.size > 0 || inflightRequests.size > 0)) ||
         manualRunning ||
         inflightRequests.size > 0 ||
         commandInflightRequests.size > 0;
@@ -345,13 +364,13 @@
     const currentText = node.textContent.trim();
     if (!currentText) return;
 
-    if (mood === "standard") {
+    if (mood === "original") {
       if (
-        node._moodlensOriginal !== undefined &&
-        currentText !== node._moodlensOriginal
+        node._mytakeOriginal !== undefined &&
+        currentText !== node._mytakeOriginal
       ) {
-        node.textContent = node._moodlensOriginal;
-        node._moodlensRephrased = undefined;
+        node.textContent = node._mytakeOriginal;
+        node._mytakeRephrased = undefined;
       }
       return;
     }
@@ -360,37 +379,38 @@
     if (processedNodes.has(node)) return;
     if (inflightNodes.has(node)) return;
 
-    if (node._moodlensTargetMood === mood) return;
+    if (node._mytakeTargetMood === mood) return;
 
     if (
-      node._moodlensRephrased !== undefined &&
-      currentText === node._moodlensRephrased
+      node._mytakeRephrased !== undefined &&
+      currentText === node._mytakeRephrased
     )
       return;
 
     if (
-      node._moodlensRephrased !== undefined &&
-      currentText !== node._moodlensRephrased
+      node._mytakeRephrased !== undefined &&
+      currentText !== node._mytakeRephrased
     ) {
-      node._moodlensOriginal = currentText;
-      node._moodlensRephrased = undefined;
-    } else if (node._moodlensOriginal === undefined) {
-      node._moodlensOriginal = currentText;
+      node._mytakeOriginal = currentText;
+      node._mytakeRephrased = undefined;
+    } else if (node._mytakeOriginal === undefined) {
+      node._mytakeOriginal = currentText;
     }
 
-    const original = node._moodlensOriginal;
+    const original = node._mytakeOriginal;
     if (original.length < MIN_CHARS || original.length > MAX_CHARS) return;
 
     const cached = getFromCache(original);
     if (cached) {
-      node._moodlensRephrased = cached;
+      node._mytakeRephrased = cached;
       node.textContent = cached;
       processedNodes.add(node);
       return;
     }
 
     pendingNodes.add(node);
-    if (mode === "auto") {
+    // Only auto-process if user has already clicked Run
+    if (manualRunning) {
       scheduleBatch();
     }
   }
@@ -402,8 +422,8 @@
   }
 
   async function processBatch() {
-    if (!enabled || !aiReady || mood === "standard") {
-      if (mood === "standard" && pendingNodes.size > 0) pendingNodes.clear();
+    if (!enabled || !aiReady || mood === "original") {
+      if (mood === "original" && pendingNodes.size > 0) pendingNodes.clear();
       manualRunning = false;
       broadcastProgress();
       return;
@@ -427,7 +447,7 @@
       if (!node.isConnected) continue;
       if (processedNodes.has(node) || inflightNodes.has(node)) continue;
 
-      const original = node._moodlensOriginal;
+      const original = node._mytakeOriginal;
       if (!original || original.length < MIN_CHARS) continue;
 
       const requestId = `req_${++requestCounter}`;
@@ -436,7 +456,7 @@
       postToMain("REPHRASE_REQUEST", { requestId, text: original });
     }
 
-    if (pendingNodes.size > 0 && (mode === "auto" || manualRunning)) {
+    if (pendingNodes.size > 0 && manualRunning) {
       scheduleBatch();
     } else if (pendingNodes.size === 0) {
       manualRunning = false;
@@ -445,7 +465,7 @@
 
   // ── Manual trigger: flush all pending ──────────────────────────────────────
   function triggerManualRewrite() {
-    if (!enabled || paused || !aiReady || mood === "standard") return;
+    if (!enabled || paused || !aiReady || mood === "original") return;
     console.log(
       `${TAG} Manual trigger — flushing ${pendingNodes.size} pending nodes`,
     );
@@ -473,7 +493,7 @@
     processedNodes = new WeakSet();
 
     scheduleScan(document.body);
-    if (mode === "auto" && !paused) {
+    if (!paused) {
       scheduleBatch();
     }
     broadcastProgress();
@@ -558,46 +578,15 @@
     );
     let n;
     while ((n = walker.nextNode())) {
-      if (n._moodlensOriginal === undefined)
-        n._moodlensOriginal = n.textContent.trim();
-      n._moodlensTargetMood = moodId;
-
-      // NEW: Fast-path Cache Check! If we already translated this exact text
-      // into this exact mood, apply it instantly and skip the AI.
-      const cached = getFromCache(n._moodlensOriginal, moodId);
-      if (cached) {
-        n._moodlensRephrased = cached;
-        n.textContent = cached;
-        processedNodes.add(n);
-        continue;
-      }
-
-      n._moodlensRephrased = undefined;
-      targetNodes.push(n);
-    }
-
-    if (targetNodes.length === 0) {
-      // If the array is empty, it means the Cache handled 100% of the paragraph!
-      targetEl.classList.remove("moodlens-target-processing");
-      targetEl.classList.add("moodlens-target-done"); // Flash green for instant success
-      setTimeout(() => targetEl.classList.remove("moodlens-target-done"), 1400);
-
-      isTargetProcessing = false;
-      deactivateTargetMode();
-      try {
-        chrome.runtime
-          .sendMessage({ type: "SET_MODE", mode: "manual" })
-          .catch(() => {});
-      } catch (_) {}
-      return;
+      rawNodes.push(n);
     }
 
     const nodes = getTargetedNodesForCommand(commandText, rawNodes);
     if (nodes.length === 0) return;
 
     for (const node of nodes) {
-      if (node._moodlensOriginal === undefined) {
-        node._moodlensOriginal = node.textContent.trim();
+      if (node._mytakeOriginal === undefined) {
+        node._mytakeOriginal = node.textContent.trim();
       }
     }
 
@@ -627,7 +616,7 @@
       if (!node.isConnected) continue;
       if (inflightNodes.has(node)) continue;
 
-      const original = node._moodlensOriginal || node.textContent.trim();
+      const original = node._mytakeOriginal || node.textContent.trim();
       if (!original || original.length < MIN_CHARS) continue;
 
       const requestId = `cmd_${++requestCounter}`;
@@ -719,8 +708,8 @@
         if (inflightNodes.has(target)) continue;
         const newText = target.textContent.trim();
         if (
-          target._moodlensRephrased !== undefined &&
-          newText === target._moodlensRephrased
+          target._mytakeRephrased !== undefined &&
+          newText === target._mytakeRephrased
         )
           continue;
         queuedMutations.add(target);
@@ -781,9 +770,9 @@
     );
     let n;
     while ((n = walker.nextNode())) {
-      if (n._moodlensOriginal) {
-        n.textContent = n._moodlensOriginal;
-        n._moodlensRephrased = undefined;
+      if (n._mytakeOriginal) {
+        n.textContent = n._mytakeOriginal;
+        n._mytakeRephrased = undefined;
         count++;
       }
     }
@@ -808,7 +797,7 @@
     mood = moodKey;
     customPrompt = newCustomPrompt || null;
 
-    if (mood === "standard") {
+    if (mood === "original") {
       broadcastProgress();
       initSession();
       return;
@@ -822,11 +811,11 @@
     );
     let n;
     while ((n = walker.nextNode())) {
-      if (n._moodlensOriginal) {
+      if (n._mytakeOriginal) {
         totalFound++;
-        const cached = getFromCache(n._moodlensOriginal);
+        const cached = getFromCache(n._mytakeOriginal);
         if (cached) {
-          n._moodlensRephrased = cached;
+          n._mytakeRephrased = cached;
           n.textContent = cached;
           processedNodes.add(n);
           cacheHits++;
@@ -907,10 +896,22 @@
 
   const PICKER_MOODS = [
     {
-      id: "standard",
-      name: "Standard",
-      desc: "Clean & neutral",
-      color: "#e4b564",
+      id: "original",
+      name: "Original",
+      desc: "View original text (Off)",
+      color: "#64748b",
+    },
+    {
+      id: "explain",
+      name: "Explain",
+      desc: "Explain like I'm 5",
+      color: "#81c784",
+    },
+    {
+      id: "donald",
+      name: "Donald",
+      desc: "Sounds like Trump",
+      color: "#ffb74d",
     },
     {
       id: "cherry",
@@ -950,100 +951,100 @@
   function injectTargetStyles() {
     if (targetStyleEl) return;
     targetStyleEl = document.createElement("style");
-    targetStyleEl.id = "moodlens-target-styles";
+    targetStyleEl.id = "mytake-target-styles";
     targetStyleEl.textContent = `
-      body.moodlens-target-active, body.moodlens-target-active * { cursor: crosshair !important; }
-      body.moodlens-target-frozen, body.moodlens-target-frozen * { cursor: default !important; }
-      .moodlens-picker-item, .moodlens-picker-close, .moodlens-picker-custom { cursor: pointer !important; }
-      #moodlens-custom-form button { cursor: pointer !important; }
-      #moodlens-custom-form input { cursor: text !important; }
+      body.mytake-target-active, body.mytake-target-active * { cursor: crosshair !important; }
+      body.mytake-target-frozen, body.mytake-target-frozen * { cursor: default !important; }
+      .mytake-picker-item, .mytake-picker-close, .mytake-picker-custom { cursor: pointer !important; }
+      #mytake-custom-form button { cursor: pointer !important; }
+      #mytake-custom-form input { cursor: text !important; }
 
-      .moodlens-target-hover {
+      .mytake-target-hover {
         outline: 2px solid #1a73e8 !important; outline-offset: 1px !important;
         background-color: rgba(26, 115, 232, 0.08) !important;
         transition: outline 60ms ease, background-color 60ms ease; position: relative;
       }
-      .moodlens-target-hover::before {
-        content: attr(data-moodlens-tag); position: absolute; top: -20px; left: 0;
+      .mytake-target-hover::before {
+        content: attr(data-mytake-tag); position: absolute; top: -20px; left: 0;
         background: #1a73e8; color: #fff; font: 700 10px/18px -apple-system, sans-serif;
         padding: 0 6px; border-radius: 3px 3px 0 0; white-space: nowrap;
         z-index: 2147483645; pointer-events: none; letter-spacing: 0.04em;
       }
 
-      .moodlens-target-processing {
+      .mytake-target-processing {
         outline: 2px dashed #f59e0b !important; outline-offset: 1px !important;
         background-color: rgba(245, 158, 11, 0.07) !important;
-        animation: moodlens-pulse 1.1s ease-in-out infinite;
+        animation: mytake-pulse 1.1s ease-in-out infinite;
         pointer-events: none !important; /* HARD LOCK CSS */
       }
       
-      .moodlens-target-error {
+      .mytake-target-error {
         outline: 2px solid #ef4444 !important; outline-offset: 1px !important;
         background-color: rgba(239, 68, 68, 0.08) !important;
         pointer-events: none !important; /* HARD LOCK CSS */
       }
 
-      @keyframes moodlens-pulse { 0%, 100% { outline-color: #f59e0b; } 50% { outline-color: #fcd34d; } }
+      @keyframes mytake-pulse { 0%, 100% { outline-color: #f59e0b; } 50% { outline-color: #fcd34d; } }
 
-      .moodlens-target-locked {
+      .mytake-target-locked {
         outline: 2px solid #1a73e8 !important; outline-offset: 1px !important;
         background-color: rgba(26, 115, 232, 0.06) !important;
       }
 
-      .moodlens-target-done {
+      .mytake-target-done {
         outline: 2px solid #22c55e !important; outline-offset: 1px !important;
         background-color: rgba(34, 197, 94, 0.07) !important;
         transition: outline-color 0.6s ease, background-color 0.6s ease;
-        animation: moodlens-done-fade 1.4s ease forwards;
+        animation: mytake-done-fade 1.4s ease forwards;
       }
 
-      @keyframes moodlens-done-fade {
+      @keyframes mytake-done-fade {
         0%   { outline-color: #22c55e; background-color: rgba(34,197,94,0.10); }
         60%  { outline-color: #22c55e; background-color: rgba(34,197,94,0.07); }
         100% { outline-color: transparent; background-color: transparent; }
       }
 
-      .moodlens-picker {
+      .mytake-picker {
         position: fixed; z-index: 2147483646; min-width: 210px; max-width: 260px;
         background: #fff; border-radius: 12px;
         box-shadow: 0 8px 32px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.07);
         font-family: -apple-system, sans-serif; font-size: 13px; overflow: hidden;
-        animation: moodlens-picker-in 120ms cubic-bezier(0.2,0.9,0.3,1); transform-origin: top left;
+        animation: mytake-picker-in 120ms cubic-bezier(0.2,0.9,0.3,1); transform-origin: top left;
       }
-      @keyframes moodlens-picker-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
+      @keyframes mytake-picker-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
 
-      .moodlens-picker-header {
+      .mytake-picker-header {
         display: flex; align-items: center; justify-content: space-between;
         padding: 10px 12px 8px; font-weight: 700; font-size: 11px;
         letter-spacing: 0.07em; text-transform: uppercase; color: #888; border-bottom: 1px solid #f0f0f0;
       }
-      .moodlens-picker-close {
+      .mytake-picker-close {
         background: none; border: none; cursor: pointer; color: #aaa; font-size: 14px;
         line-height: 1; padding: 2px 4px; border-radius: 4px; transition: background 80ms, color 80ms;
       }
-      .moodlens-picker-close:hover { background: #f0f0f0; color: #555; }
+      .mytake-picker-close:hover { background: #f0f0f0; color: #555; }
 
-      .moodlens-picker-item {
+      .mytake-picker-item {
         display: flex; align-items: center; gap: 9px; padding: 8px 12px;
         cursor: pointer; transition: background 80ms; position: relative;
       }
-      .moodlens-picker-item:hover { background: #f0f4ff; }
-      .moodlens-picker-item.already-done::after {
+      .mytake-picker-item:hover { background: #f0f4ff; }
+      .mytake-picker-item.already-done::after {
         content: "✓"; position: absolute; right: 12px; color: #1a73e8; font-weight: 700; font-size: 12px;
       }
 
-      .moodlens-swatch { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
-      .moodlens-picker-label { font-weight: 600; color: #111; font-size: 13px; min-width: 58px; }
-      .moodlens-picker-desc { font-size: 11px; color: #888; flex: 1; }
-      .moodlens-picker-divider { height: 1px; background: #f0f0f0; margin: 2px 0; }
-      .moodlens-picker-custom {
+      .mytake-swatch { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+      .mytake-picker-label { font-weight: 600; color: #111; font-size: 13px; min-width: 58px; }
+      .mytake-picker-desc { font-size: 11px; color: #888; flex: 1; }
+      .mytake-picker-divider { height: 1px; background: #f0f0f0; margin: 2px 0; }
+      .mytake-picker-custom {
         display: flex; align-items: center; gap: 8px; padding: 8px 12px 10px;
         cursor: pointer; font-size: 12px; font-weight: 600; color: #666; transition: background 80ms, color 80ms;
       }
-      .moodlens-picker-custom:hover { background: #f5f5f5; color: #111; }
-      .moodlens-picker-custom span:first-child { color: #a78bfa; font-size: 14px; }
+      .mytake-picker-custom:hover { background: #f5f5f5; color: #111; }
+      .mytake-picker-custom span:first-child { color: #a78bfa; font-size: 14px; }
 
-      #moodlens-processing-badge {
+      #mytake-processing-badge {
         position: fixed; z-index: 2147483647; display: flex; align-items: center; gap: 7px;
         padding: 6px 12px 6px 9px; background: #1a1a1a; color: #fff; border-radius: 999px;
         font: 600 12px/1 -apple-system, sans-serif;
@@ -1066,8 +1067,8 @@
       targetStyleEl.remove();
       targetStyleEl = null;
     }
-    document.querySelectorAll("[data-moodlens-tag]").forEach((el) => {
-      el.removeAttribute("data-moodlens-tag");
+    document.querySelectorAll("[data-mytake-tag]").forEach((el) => {
+      el.removeAttribute("data-mytake-tag");
     });
   }
 
@@ -1078,7 +1079,7 @@
     isTargetProcessing = false;
     targetLockedEl = null;
     injectTargetStyles();
-    document.body.classList.add("moodlens-target-active");
+    document.body.classList.add("mytake-target-active");
     document.addEventListener("mouseover", onTargetMouseOver, true);
     document.addEventListener("mouseout", onTargetMouseOut, true);
     document.addEventListener("click", onTargetClick, true);
@@ -1092,8 +1093,8 @@
     pickerFrozen = false;
     isTargetProcessing = false;
     targetLockedEl = null;
-    document.body.classList.remove("moodlens-target-active");
-    document.body.classList.remove("moodlens-target-frozen");
+    document.body.classList.remove("mytake-target-active");
+    document.body.classList.remove("mytake-target-frozen");
     document.removeEventListener("mouseover", onTargetMouseOver, true);
     document.removeEventListener("mouseout", onTargetMouseOut, true);
     document.removeEventListener("click", onTargetClick, true);
@@ -1114,20 +1115,20 @@
   function unfreezeTargetMode() {
     pickerFrozen = false;
     targetLockedEl = null;
-    document.body.classList.remove("moodlens-target-frozen");
+    document.body.classList.remove("mytake-target-frozen");
     clearTargetLocked();
   }
 
   function clearTargetLocked() {
-    document.querySelectorAll(".moodlens-target-locked").forEach((el) => {
-      el.classList.remove("moodlens-target-locked");
+    document.querySelectorAll(".mytake-target-locked").forEach((el) => {
+      el.classList.remove("mytake-target-locked");
     });
   }
 
   function clearTargetHover() {
     if (targetHoveredEl) {
-      targetHoveredEl.classList.remove("moodlens-target-hover");
-      targetHoveredEl.removeAttribute("data-moodlens-tag");
+      targetHoveredEl.classList.remove("mytake-target-hover");
+      targetHoveredEl.removeAttribute("data-mytake-tag");
       targetHoveredEl = null;
     }
   }
@@ -1142,7 +1143,7 @@
       }
 
       if (pickerFrozen) {
-        const form = document.getElementById("moodlens-custom-form");
+        const form = document.getElementById("mytake-custom-form");
         if (form) form.remove();
         dismissPicker();
         return;
@@ -1158,7 +1159,7 @@
 
   function isPickerEl(el) {
     if (targetPicker && targetPicker.contains(el)) return true;
-    const form = document.getElementById("moodlens-custom-form");
+    const form = document.getElementById("mytake-custom-form");
     if (form && form.contains(el)) return true;
     return false;
   }
@@ -1170,8 +1171,8 @@
     if (!el || el === targetHoveredEl) return;
     clearTargetHover();
     targetHoveredEl = el;
-    el.classList.add("moodlens-target-hover");
-    el.setAttribute("data-moodlens-tag", el.tagName.toLowerCase());
+    el.classList.add("mytake-target-hover");
+    el.setAttribute("data-mytake-tag", el.tagName.toLowerCase());
   }
 
   function onTargetMouseOut(e) {
@@ -1198,8 +1199,8 @@
 
     pickerFrozen = true;
     targetLockedEl = el;
-    el.classList.add("moodlens-target-locked");
-    document.body.classList.add("moodlens-target-frozen");
+    el.classList.add("mytake-target-locked");
+    document.body.classList.add("mytake-target-frozen");
 
     showPicker(el, e.clientX, e.clientY);
   }
@@ -1271,7 +1272,7 @@
 
   function renderPicker(targetEl, clientX, clientY, customMoods) {
     const picker = document.createElement("div");
-    picker.className = "moodlens-picker";
+    picker.className = "mytake-picker";
     targetPicker = picker;
 
     const allMoods = [
@@ -1290,14 +1291,14 @@
     const existingRegion = targetRegions[key];
 
     picker.innerHTML = `
-      <div class="moodlens-picker-header">
+      <div class="mytake-picker-header">
         <span>Apply tone to selection</span>
-        <button class="moodlens-picker-close" title="Close">✕</button>
+        <button class="mytake-picker-close" title="Close">✕</button>
       </div>
     `;
 
     picker
-      .querySelector(".moodlens-picker-close")
+      .querySelector(".mytake-picker-close")
       .addEventListener("click", (e) => {
         e.stopPropagation();
         dismissPicker();
@@ -1307,17 +1308,17 @@
       const isAlreadyDone = existingRegion?.mood === m.id;
       const item = document.createElement("div");
       item.className =
-        "moodlens-picker-item" + (isAlreadyDone ? " already-done" : "");
+        "mytake-picker-item" + (isAlreadyDone ? " already-done" : "");
       item.innerHTML = `
-        <span class="moodlens-swatch" style="background:${m.color}"></span>
-        <span class="moodlens-picker-label">${m.name}</span>
-        <span class="moodlens-picker-desc">${m.desc}</span>
+        <span class="mytake-swatch" style="background:${m.color}"></span>
+        <span class="mytake-picker-label">${m.name}</span>
+        <span class="mytake-picker-desc">${m.desc}</span>
       `;
       item.addEventListener("click", (e) => {
         e.stopPropagation();
         closePicker();
-        targetEl.classList.remove("moodlens-target-locked");
-        targetEl.classList.add("moodlens-target-processing");
+        targetEl.classList.remove("mytake-target-locked");
+        targetEl.classList.add("mytake-target-processing");
         showProcessingBadge(targetEl);
         applyTargetMood(targetEl, m.id, m.prompt || null);
       });
@@ -1325,11 +1326,11 @@
     }
 
     const div = document.createElement("div");
-    div.className = "moodlens-picker-divider";
+    div.className = "mytake-picker-divider";
     picker.appendChild(div);
 
     const customBtn = document.createElement("div");
-    customBtn.className = "moodlens-picker-custom";
+    customBtn.className = "mytake-picker-custom";
     customBtn.innerHTML = `<span>✦</span><span>Create Custom…</span>`;
     customBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1367,7 +1368,7 @@
 
   function openCustomMoodInlineForm(targetEl) {
     const form = document.createElement("div");
-    form.id = "moodlens-custom-form";
+    form.id = "mytake-custom-form";
     form.style.cssText = `
       position:fixed; z-index:2147483647; top:50%; left:50%; transform:translate(-50%,-50%);
       background:#fff; border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.22), 0 0 0 1px rgba(0,0,0,0.06);
@@ -1433,8 +1434,8 @@
           .catch(() => {});
       } catch (_) {}
       form.remove();
-      targetEl.classList.remove("moodlens-target-locked");
-      targetEl.classList.add("moodlens-target-processing");
+      targetEl.classList.remove("mytake-target-locked");
+      targetEl.classList.add("mytake-target-processing");
       showProcessingBadge(targetEl);
       applyTargetMood(targetEl, id, prompt);
     });
@@ -1453,7 +1454,7 @@
   function showProcessingBadge(targetEl) {
     removeProcessingBadge();
     const badge = document.createElement("div");
-    badge.id = "moodlens-processing-badge";
+    badge.id = "mytake-processing-badge";
     badge.innerHTML = `
       <span class="mlbadge-spinner"></span>
       <span class="mlbadge-text">Applying…</span>
@@ -1471,7 +1472,7 @@
   function showErrorBadge(targetEl, errorMsg, onClose) {
     removeProcessingBadge();
     const badge = document.createElement("div");
-    badge.id = "moodlens-processing-badge";
+    badge.id = "mytake-processing-badge";
     badge.style.background = "#ef4444";
     badge.style.pointerEvents = "auto"; // Ensure close button is clickable
     badge.innerHTML = `
@@ -1531,8 +1532,12 @@
 
   // ── Apply mood to a specific element ─────────────────────────────────────────
   const TARGET_MOOD_PROMPTS = {
-    standard:
+    original:
       "You rephrase text in a clean, neutral, everyday style. Keep the exact meaning. Output ONLY the rephrased text, nothing else.",
+    explain:
+      "You explain text in very simple terms, like you're talking to a 5-year-old. Break down complex concepts into basic ideas. Output ONLY the simplified text, nothing else.",
+    donald:
+      "You rephrase text in the speaking style of Donald J. Trump. Use his characteristic speech patterns, repetition, superlatives, and exclamations. Output ONLY the rephrased text, nothing else.",
     cherry:
       "You rephrase text in a warm, cheerful, uplifting tone — like a good friend sharing great news. Add a little brightness without changing the facts. Output ONLY the rephrased text, nothing else.",
     honest:
@@ -1551,13 +1556,13 @@
     console.log(`${TAG} [Target] Applying mood "${moodId}" to`, targetEl);
     saveTargetRegion(targetEl, moodId, customPromptStr);
 
-    if (moodId === "standard") {
+    if (moodId === "original") {
       const walker = document.createTreeWalker(targetEl, NodeFilter.SHOW_TEXT);
       let n;
       while ((n = walker.nextNode())) {
-        if (n._moodlensOriginal) {
-          n.textContent = n._moodlensOriginal;
-          n._moodlensRephrased = undefined;
+        if (n._mytakeOriginal) {
+          n.textContent = n._mytakeOriginal;
+          n._mytakeRephrased = undefined;
         }
       }
       deactivateTargetMode();
@@ -1567,11 +1572,11 @@
     const systemPrompt =
       customPromptStr ||
       TARGET_MOOD_PROMPTS[moodId] ||
-      TARGET_MOOD_PROMPTS.standard;
+      TARGET_MOOD_PROMPTS.original;
 
     // ── HARD LOCK ENGAGED ──
     isTargetProcessing = true;
-    targetEl.classList.add("moodlens-target-processing");
+    targetEl.classList.add("mytake-target-processing");
 
     const targetNodes = [];
     const walker = document.createTreeWalker(targetEl, NodeFilter.SHOW_TEXT, {
@@ -1589,17 +1594,35 @@
 
     let n;
     while ((n = walker.nextNode())) {
-      if (n._moodlensOriginal === undefined)
-        n._moodlensOriginal = n.textContent.trim();
-      n._moodlensRephrased = undefined;
-      n._moodlensTargetMood = moodId;
+      if (n._mytakeOriginal === undefined)
+        n._mytakeOriginal = n.textContent.trim();
+      n._mytakeTargetMood = moodId;
+
+      // Fast-path: use cached result if available
+      const cached = getFromCache(n._mytakeOriginal, moodId);
+      if (cached) {
+        n._mytakeRephrased = cached;
+        n.textContent = cached;
+        processedNodes.add(n);
+        continue;
+      }
+
+      n._mytakeRephrased = undefined;
       targetNodes.push(n);
     }
 
     if (targetNodes.length === 0) {
-      targetEl.classList.remove("moodlens-target-processing");
+      targetEl.classList.remove("mytake-target-processing");
+      removeProcessingBadge();
+      targetEl.classList.add("mytake-target-done");
+      setTimeout(() => targetEl.classList.remove("mytake-target-done"), 1400);
       isTargetProcessing = false;
       deactivateTargetMode();
+      try {
+        chrome.runtime
+          .sendMessage({ type: "SET_MODE", mode: "manual" })
+          .catch(() => {});
+      } catch (_) {}
       return;
     }
 
@@ -1620,11 +1643,11 @@
 
         if (hasError) {
           // ── PERSISTENT ERROR STATE ──
-          targetEl.classList.remove("moodlens-target-processing");
-          targetEl.classList.add("moodlens-target-error");
+          targetEl.classList.remove("mytake-target-processing");
+          targetEl.classList.add("mytake-target-error");
 
           showErrorBadge(targetEl, lastErrorMessage, () => {
-            targetEl.classList.remove("moodlens-target-error");
+            targetEl.classList.remove("mytake-target-error");
             removeProcessingBadge();
             deactivateTargetMode();
             try {
@@ -1635,11 +1658,11 @@
           });
         } else {
           // ── SUCCESS STATE ──
-          targetEl.classList.remove("moodlens-target-processing");
+          targetEl.classList.remove("mytake-target-processing");
           removeProcessingBadge();
-          targetEl.classList.add("moodlens-target-done");
+          targetEl.classList.add("mytake-target-done");
           setTimeout(
-            () => targetEl.classList.remove("moodlens-target-done"),
+            () => targetEl.classList.remove("mytake-target-done"),
             1400,
           );
 
@@ -1660,7 +1683,7 @@
       inflightRequestCallbacks.set(requestId, onTargetNodeDone);
       postToMain("TARGET_REPHRASE_REQUEST", {
         requestId,
-        text: node._moodlensOriginal,
+        text: node._mytakeOriginal,
         systemPrompt,
       });
     }
@@ -1669,7 +1692,11 @@
   }
 
   // ── Chrome runtime message listener ─────────────────────────────────────────
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === "GET_AI_STATUS") {
+      sendResponse({ available: aiReady, error: aiError });
+      return true;
+    }
     if (msg.type === "POPUP_STATE") {
       popupOpen = !!msg.open;
       if (popupOpen) broadcastProgress();
@@ -1730,8 +1757,10 @@
         startObserver(); // Wake up scanners
         scheduleScan(document.body); // Do a fresh sweep to catch anything missed while paused
 
-        if ((mode === "auto" || manualRunning) && pendingNodes.size > 0)
+        if (pendingNodes.size > 0) {
+          manualRunning = true;
           scheduleBatch();
+        }
         broadcastProgress();
       }
     }
@@ -1740,7 +1769,7 @@
 
     if (msg.type === "MODE_CHANGED") {
       mode = msg.mode;
-      if (mode === "auto" && pendingNodes.size > 0 && !paused) scheduleBatch();
+
     }
 
     if (msg.type === "TRIGGER_REWRITE") triggerManualRewrite();
@@ -1757,16 +1786,16 @@
       try {
         chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
           if (chrome.runtime.lastError)
-            resolve({ mood: "standard", enabled: true, mode: "manual" });
+            resolve({ mood: "original", enabled: true, mode: "manual" });
           else resolve(state);
         });
       } catch (err) {
-        resolve({ mood: "standard", enabled: true, mode: "manual" });
+        resolve({ mood: "original", enabled: true, mode: "manual" });
       }
     }),
     loadCache(),
   ]).then(([state]) => {
-    mood = state?.mood || "standard";
+    mood = state?.mood || "original";
     enabled = state?.enabled !== false;
     mode = state?.mode || "manual";
     customPrompt = state?.customPrompt || null;

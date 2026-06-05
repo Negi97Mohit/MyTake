@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "description": "Your browser, Your tone/ mood — powered by Chrome's built-in Nano AI.",
   "permissions": ["storage", "scripting", "tabs"],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js"
   },

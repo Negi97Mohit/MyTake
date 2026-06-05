@@ -2,7 +2,7 @@
 (function () {
   if (typeof window.chrome !== "undefined" && window.chrome.runtime) return;
   const store = {
-    mood: "standard",
+    mood: "original",
     enabled: true,
     mode: "manual",
     intensity: 2,

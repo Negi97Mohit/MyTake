@@ -1,5 +1,3 @@
-/* MyTake — iOS Mood-tracker inspired popup */
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 
 *,
 *::before,
@@ -50,10 +48,20 @@
 }
 
 /* Per-mood hues — soothing, calm, low-saturation pastels */
-body[data-mood="standard"] {
-  --mood-h: 40;
-  --mood-s: 32%;
-  --mood-l: 78%;
+body[data-mood="original"] {
+  --mood-h: 215;
+  --mood-s: 25%;
+  --mood-l: 65%;
+}
+body[data-mood="explain"] {
+  --mood-h: 110;
+  --mood-s: 40%;
+  --mood-l: 75%;
+}
+body[data-mood="donald"] {
+  --mood-h: 25;
+  --mood-s: 80%;
+  --mood-l: 75%;
 }
 body[data-mood="cherry"] {
   --mood-h: 350;
@@ -211,35 +219,89 @@ body.dark-theme .circle-btn {
     0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
-/* ── AI Banner ──────────────────────────────────────── */
-.ai-banner {
+/* ── AI Onboarding Disclaimer Overlay ───────────────── */
+.disclaimer-overlay {
   display: none;
-  position: relative;
-  z-index: 2;
-  margin: 8px 16px 0;
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.55);
+  position: fixed;
+  inset: 0;
+  background: linear-gradient(
+    160deg,
+    var(--bg-1) 0%,
+    var(--bg-2) 50%,
+    var(--bg-3) 100%
+  );
+  z-index: 9999;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  backdrop-filter: blur(15px);
+  -webkit-backdrop-filter: blur(15px);
+  animation: fadeIn 0.3s var(--ease);
+}
+.disclaimer-overlay.show {
+  display: flex;
+}
+.disclaimer-content {
+  background: var(--surface);
   border: 1px solid var(--hairline-strong);
-  border-radius: var(--r);
-  font-size: 11.5px;
-  backdrop-filter: blur(10px);
+  border-radius: var(--r-xl);
+  padding: 20px;
+  width: 100%;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.4) inset,
+    0 12px 30px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(25px);
+  -webkit-backdrop-filter: blur(25px);
+  color: var(--text);
 }
-.ai-banner.show {
-  display: block;
+.disclaimer-title {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 10px;
 }
-.ai-banner-title {
-  font-weight: 700;
-  margin-bottom: 5px;
-}
-.ai-banner-steps {
+.disclaimer-steps {
   padding-left: 16px;
   color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 8px;
 }
-.ai-detail {
-  margin-top: 6px;
+.disclaimer-steps li {
+  margin-bottom: 4px;
+}
+.disclaimer-detail {
+  font-size: 11px;
   color: var(--text-dim);
-  font-size: 10.5px;
+  line-height: 1.4;
+  margin-top: 4px;
 }
+.disclaimer-troubleshooting {
+  margin-top: 12px;
+  border-top: 1px dashed var(--hairline-strong);
+  padding-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.disclaimer-troubleshooting summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--text-muted);
+  outline: none;
+  user-select: none;
+}
+.disclaimer-troubleshooting summary:hover {
+  color: var(--text);
+}
+.disclaimer-troubleshooting summary::-webkit-details-marker {
+  color: var(--text-muted);
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+
 
 /* ── Main ───────────────────────────────────────────── */
 #main-content {
@@ -543,6 +605,21 @@ body.dark-theme .intensity-badge {
   border: 1px solid var(--hairline);
   border-radius: 999px;
   backdrop-filter: blur(8px);
+  position: relative;
+}
+.mode-switch.disabled {
+  pointer-events: none;
+}
+.mode-switch.disabled::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.65);
+  border-radius: 999px;
+  z-index: 10;
 }
 body.dark-theme .mode-switch {
   background: rgba(255, 255, 255, 0.06);
@@ -907,10 +984,20 @@ html {
 html[data-mood] {
   /* per-mood hue mirrors body */
 }
-html[data-mood="standard"] {
-  --mood-h: 38;
-  --mood-s: 78%;
-  --mood-l: 62%;
+html[data-mood="original"] {
+  --mood-h: 215;
+  --mood-s: 25%;
+  --mood-l: 65%;
+}
+html[data-mood="explain"] {
+  --mood-h: 110;
+  --mood-s: 40%;
+  --mood-l: 75%;
+}
+html[data-mood="donald"] {
+  --mood-h: 25;
+  --mood-s: 80%;
+  --mood-l: 75%;
 }
 html[data-mood="cherry"] {
   --mood-h: 348;
@@ -1188,12 +1275,12 @@ body.dark-theme .run-btn:hover {
 /* ── In-page target mode overlay (injected by content.js) ── */
 
 /* Crosshair cursor on the whole page */
-body.moodlens-target-active * {
+body.mytake-target-active * {
   cursor: crosshair !important;
 }
 
 /* Element hover highlight */
-.moodlens-target-hover {
+.mytake-target-hover {
   outline: 2px dashed hsl(200 80% 55%) !important;
   outline-offset: 2px !important;
   background: hsl(200 80% 55% / 0.06) !important;
@@ -1203,7 +1290,7 @@ body.moodlens-target-active * {
 }
 
 /* Floating mood picker context menu */
-.moodlens-picker {
+.mytake-picker {
   position: fixed;
   z-index: 2147483647;
   background: #fff;
@@ -1233,7 +1320,7 @@ body.moodlens-target-active * {
   }
 }
 
-.moodlens-picker-header {
+.mytake-picker-header {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.09em;
@@ -1247,7 +1334,7 @@ body.moodlens-target-active * {
   justify-content: space-between;
 }
 
-.moodlens-picker-close {
+.mytake-picker-close {
   background: none;
   border: 0;
   cursor: pointer;
@@ -1264,12 +1351,12 @@ body.moodlens-target-active * {
     background 0.1s,
     color 0.1s;
 }
-.moodlens-picker-close:hover {
+.mytake-picker-close:hover {
   background: rgba(0, 0, 0, 0.08);
   color: #555;
 }
 
-.moodlens-picker-item {
+.mytake-picker-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1279,13 +1366,13 @@ body.moodlens-target-active * {
   transition: background 0.12s;
   color: #222;
 }
-.moodlens-picker-item:hover {
+.mytake-picker-item:hover {
   background: rgba(0, 0, 0, 0.05);
 }
-.moodlens-picker-item.already-done {
+.mytake-picker-item.already-done {
   opacity: 0.5;
 }
-.moodlens-picker-item.already-done::after {
+.mytake-picker-item.already-done::after {
   content: "✓";
   margin-left: auto;
   font-size: 10px;
@@ -1293,7 +1380,7 @@ body.moodlens-target-active * {
   font-weight: 700;
 }
 
-.moodlens-swatch {
+.mytake-swatch {
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -1301,23 +1388,23 @@ body.moodlens-target-active * {
   border: 1px solid rgba(0, 0, 0, 0.12);
 }
 
-.moodlens-picker-label {
+.mytake-picker-label {
   font-weight: 600;
   font-size: 12px;
 }
-.moodlens-picker-desc {
+.mytake-picker-desc {
   font-size: 10px;
   color: #888;
   margin-left: auto;
 }
 
-.moodlens-picker-divider {
+.mytake-picker-divider {
   height: 1px;
   background: rgba(0, 0, 0, 0.06);
   margin: 4px 0;
 }
 
-.moodlens-picker-custom {
+.mytake-picker-custom {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1329,18 +1416,18 @@ body.moodlens-target-active * {
   color: #5a3de8;
   transition: background 0.12s;
 }
-.moodlens-picker-custom:hover {
+.mytake-picker-custom:hover {
   background: rgba(90, 61, 232, 0.07);
 }
 
 /* Processing overlay on targeted element */
-.moodlens-target-processing {
+.mytake-target-processing {
   outline: 2px solid hsl(200 80% 55%) !important;
   outline-offset: 2px !important;
   background: hsl(200 80% 55% / 0.04) !important;
   position: relative;
 }
-.moodlens-target-processing::after {
+.mytake-target-processing::after {
   content: "✦ Processing…";
   position: absolute;
   top: -20px;
