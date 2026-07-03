@@ -17,9 +17,34 @@
 
 ## What is MyTake?
 
-MyTake is a Chrome extension that rewrites every text node on a webpage in a mood of your choosing — Cherry (warm & uplifting), Brutal (blunt & straight), Academic (formal & precise), Poetic, Casual, and more. It runs entirely on **Chrome's built-in Gemini Nano** via the experimental Prompt API, meaning no text leaves your browser and no external AI service is contacted.
+Ever wish the internet just spoke your language? Welcome to MyTake! Whether you are tired of corporate jargon, looking for a little poetic flair, or just want the brutally honest truth, MyTake instantly rephrases the text on any webpage to match your exact vibe.
 
-Switch the mood on any article, news page, or documentation and read it in the voice you actually want.
+Powered entirely by Chrome’s built-in, on-device AI (Gemini Nano), your browsing stays completely private, lightning-fast, and deeply personal. Wrapped in a chic, clean interface, MyTake stays out of your way until you need it.
+
+✨ Find Your Perfect Tone
+Choose from our curated built-in moods to instantly shift the energy of whatever you are reading:
+- **Original**: View original text (Off).
+- **Explain**: Simple terms, like talking to a 5-year-old.
+- **Donald**: Speech style of Donald J. Trump.
+- **Cherry**: Warm, cheerful, and uplifting.
+- **Honest**: Direct, clear, and fluff-free.
+- **Brutal**: Blunt, straight-shooting, and unfiltered.
+- **Academic**: Formal, precise, and measured.
+- **Casual**: Laid-back and relaxed.
+- **Poetic**: Evocative, rhythmic, and beautifully flowing.
+
+🎯 Read Your Way
+MyTake adapts to your reading habits with two flexible translation modes:
+- **Manual Mode**: Read at your own pace and click "Run" whenever you want to rephrase the current page.
+- **Target Mode (⊕)**: Need a specific paragraph simplified? Click the target icon, highlight any area on the page, and isolate the translation exactly where you need it.
+
+🛠️ Infinite Customization
+Can't find the exact vibe you are looking for? Create it! Add your own custom moods by simply giving it a name and a short description (e.g., "Speak like a pirate"). MyTake will instantly generate a beautifully styled custom pill and apply your unique prompt to the web.
+
+🔒 Privacy-First, On-Device AI
+Your reading habits belong to you. MyTake leverages Chrome’s Prompt API and local AI models to process everything directly on your machine. No cloud servers, no API keys, and zero data leaving your browser.
+
+Crafted with care by Creator Enji.
 
 ---
 

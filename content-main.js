@@ -10,6 +10,9 @@
 
   // ── Single shared session ─────────────────────────────────────────────────
   let sharedSession = null;
+  let sharedIntentSession = null;
+  let sharedAskSession = null;
+  let lastPageContext = null;
   let sessionInitializing = false;
   let sessionDead = false;
   let initAttempts = 0;
@@ -18,6 +21,7 @@
   // ── Serial request queue ──────────────────────────────────────────────────
   const requestQueue = [];
   let queueActive = false;
+  const activeAskControllers = {};
 
   const MOOD_PROMPTS = {
     explain:
@@ -63,16 +67,8 @@
   }
 
   function triggerModelUpdate() {
-    try {
-      window.postMessage(
-        {
-          channel: CHANNEL,
-          direction: "TO_ISOLATED",
-          type: "REQUEST_MODEL_UPDATE",
-        },
-        "*",
-      );
-    } catch (_) {}
+    // Disabled: Do not aggressively open chrome://components/
+    console.log(`${TAG} triggerModelUpdate called, but disabled to prevent spam.`);
   }
 
   // ── Create the one shared session ─────────────────────────────────────────
@@ -159,7 +155,7 @@
             systemPrompt: systemPrompt,
             temperature: 0.6,
             topK: 40,
-            expectedLanguage: "en",
+            expectedLanguage: "en", outputLanguage: "en",
             monitor: monitorCallback,
           }),
           SESSION_TIMEOUT_MS,
@@ -174,6 +170,7 @@
           sharedSession = await withTimeout(
             lm.create({
               systemPrompt: systemPrompt,
+              expectedLanguage: "en", outputLanguage: "en",
               monitor: monitorCallback,
             }),
             SESSION_TIMEOUT_MS,
@@ -185,7 +182,7 @@
             err2.message,
           );
           sharedSession = await withTimeout(
-            lm.create(),
+            lm.create({ expectedLanguage: "en", outputLanguage: "en" }),
             SESSION_TIMEOUT_MS,
             "Simple create",
           );
@@ -215,8 +212,21 @@
   }
 
   // ── Enqueue a request ─────────────────────────────────────────────────────
-  function enqueue(item) {
-    if (sessionDead) {
+  async function enqueue(item) {
+    // Model Availability Circuit Breaker Pre-flight check
+    if (item.typePrefix !== "INTENT") {
+      const avail = await checkAvailability();
+      if (avail === "no" || avail === "unavailable" || avail === "no_api") {
+        console.warn(`${TAG} Circuit Breaker: Model unavailable before request`);
+        post(`${item.typePrefix}_FAIL`, {
+          requestId: item.requestId,
+          error: "Model unavailable",
+        });
+        post("AI_STATUS", { available: false, error: avail });
+        return;
+      }
+    }
+    if (sessionDead && item.typePrefix !== "INTENT") {
       post(`${item.typePrefix}_FAIL`, {
         requestId: item.requestId,
         error: "Model unavailable",
@@ -229,21 +239,22 @@
 
   function drainQueue() {
     if (queueActive || requestQueue.length === 0) return;
-    if (!sharedSession) {
-      initSharedSession().then((ok) => {
-        if (ok) drainQueue();
-      });
-      return;
-    }
-    if (sessionDead) {
-      while (requestQueue.length > 0) {
-        const item = requestQueue.shift();
-        post(`${item.typePrefix}_FAIL`, {
-          requestId: item.requestId,
-          error: "Model unavailable",
-        });
+    
+    const nextItem = requestQueue[0];
+
+    if (nextItem.typePrefix !== "INTENT") {
+      if (sessionDead) {
+        requestQueue.shift();
+        post(`${nextItem.typePrefix}_FAIL`, { requestId: nextItem.requestId, error: "Model unavailable" });
+        drainQueue();
+        return;
       }
-      return;
+      if (!sharedSession) {
+        initSharedSession().then((ok) => {
+          if (ok) drainQueue();
+        });
+        return;
+      }
     }
 
     const item = requestQueue.shift();
@@ -257,6 +268,11 @@
   }
 
   async function runItem(item) {
+    if (item.typePrefix === "INTENT") {
+      await doIntent(item.requestId, item.prompt, item.text, item.html);
+      return;
+    }
+
     const { requestId, prompt, typePrefix } = item;
     console.log(`${TAG} Starting ${typePrefix} for ${requestId}`);
 
@@ -277,7 +293,7 @@
       if (isFatal) {
         console.error(`${TAG} Session fatally dead: ${msg}`);
         sharedSession = null;
-        sessionDead = true; // Hard-lock the session flag
+        sessionDead = false; // Allow retry on next request
 
         // Purge all pending requests immediately
         while (requestQueue.length > 0) {
@@ -294,6 +310,182 @@
         );
       }
       post(`${typePrefix}_FAIL`, { requestId, error: msg });
+    }
+  }
+
+  // ── Job classification ──────────────────────────────────────────────────
+  // Decides HOW the prompt should be applied to the selected element:
+  //   LOCATE_AND_MODIFY    → output DOM shape ≈ input DOM shape. We find
+  //                          specific text/nodes and tweak a narrow property
+  //                          (style, or a substring's text). 1:1 node mapping.
+  //   TRANSFORM_AND_REPLACE → the user wants a new end-state generated from
+  //                          the old content as raw material. Old structure
+  //                          (lists, paragraphs, etc.) is discarded — no
+  //                          per-node mapping, the whole boundary is swapped.
+  //
+  // `operation` sub-routes LOCATE_AND_MODIFY:
+  //   style        → existing CSS-object generation path
+  //   text_pattern → NEW: substring-level targets ("words starting with T",
+  //                  "the price") that don't map to whole text nodes
+  //   rephrase     → existing per-text-node rephrase path (today's default)
+  async function classifyJob(prompt, html, tools) {
+    const classifierPrompt =
+      `You analyze a user's editing request against HTML they selected.\n` +
+      `Request: "${prompt}"\n` +
+      `Available tools: ${tools.map((t) => t.name).join(",") || "none"}\n\n` +
+      `Classify into ONE jobType:\n` +
+      `- LOCATE_AND_MODIFY: output should keep the same DOM structure/shape. ` +
+      `Finding specific text or nodes and changing a narrow property (style, ` +
+      `a substring's text, or rephrasing existing text in place). Examples: ` +
+      `"make this red", "underline words starting with T", "show the price in USD", ` +
+      `"rewrite this in a formal tone".\n` +
+      `- TRANSFORM_AND_REPLACE: output structure should NOT match input structure. ` +
+      `New content is generated from the old content as raw material; old structure ` +
+      `(lists, paragraphs, headings) is discarded or reshaped. Examples: "summarize ` +
+      `this", "turn this into bullet points", "condense this to one sentence", ` +
+      `"merge this list into a paragraph".\n` +
+      `- TOOL: the request requires calling one of the available tools.\n\n` +
+      `If LOCATE_AND_MODIFY, also pick an operation:\n` +
+      `- "style": a visual/CSS change (color, size, spacing, borders, etc.)\n` +
+      `- "text_pattern": only specific words/substrings inside the text should change ` +
+      `(not all the text, not a full rewrite) — e.g. "underline words starting with T", ` +
+      `"show the price in USD"\n` +
+      `- "rephrase": the existing text should be rewritten in place, same structure, ` +
+      `same number of nodes — e.g. tone/style changes to the whole text\n\n` +
+      `Respond ONLY with JSON, no markdown:\n` +
+      `{"jobType": "LOCATE_AND_MODIFY" | "TRANSFORM_AND_REPLACE" | "TOOL", ` +
+      `"operation": "style" | "text_pattern" | "rephrase" | null, ` +
+      `"scopeNote": "<short phrase: what part of the selection is affected, or 'entire selection'>"}`;
+
+    const result = await sharedIntentSession.prompt(classifierPrompt);
+    const cleaned = result.replace(/```json/g, "").replace(/```/g, "").trim();
+
+    console.log(`[MyTake-Dataset] Job Classification for "${prompt}":`, {
+      input: prompt,
+      output: cleaned,
+    });
+
+    try {
+      const parsed = JSON.parse(cleaned);
+      if (parsed && parsed.jobType) return parsed;
+    } catch (e) {
+      console.warn(`${TAG} Classifier JSON parse failed, falling back:`, e.message);
+    }
+    // Fallback: preserve old default behavior (per-node rephrase) if parsing fails.
+    return { jobType: "LOCATE_AND_MODIFY", operation: "rephrase", scopeNote: "entire selection" };
+  }
+
+  async function doIntent(requestId, prompt, text, html) {
+    console.log(`${TAG} Starting INTENT for ${requestId}`);
+    let tools = [];
+    if (document.modelContext && typeof document.modelContext.getTools === "function") {
+      try {
+        tools = await document.modelContext.getTools() || [];
+      } catch (e) {
+        console.warn(`${TAG} Failed to get WebMCP tools:`, e);
+      }
+    }
+
+    const lm = getAPI();
+    try {
+      if (!sharedIntentSession) {
+        sharedIntentSession = await lm.create({ expectedLanguage: "en", outputLanguage: "en", temperature: 0.2 });
+      }
+
+      const job = await classifyJob(prompt, html, tools);
+      console.log(`${TAG} Job classified:`, job);
+
+      // ── TOOL ────────────────────────────────────────────────────────────
+      if (job.jobType === "TOOL" && tools.length > 0) {
+        const toolPrompt = `Which tool? Available: ${tools.map(t=>t.name).join(',')}. Output ONLY the tool name.`;
+        const toolResult = await sharedIntentSession.prompt(toolPrompt);
+        const toolName = toolResult.replace(/```/g, "").trim();
+        const targetTool = tools.find(t => t.name === toolName);
+
+        if (targetTool) {
+          const argsPrompt = `Given prompt "${prompt}", output JSON args for tool ${targetTool.name} (Schema: ${targetTool.inputSchema}). ONLY output valid JSON.`;
+          const argsResult = await sharedIntentSession.prompt(argsPrompt);
+          const argsCleaned = argsResult.replace(/```json/g, "").replace(/```/g, "").trim();
+          try {
+            const execResult = await document.modelContext.executeTool(targetTool, argsCleaned);
+            console.log(`${TAG} Executed tool ${targetTool.name}:`, execResult);
+            console.log(`[MyTake-Dataset] Tool Execution for "${prompt}":`, { tool: targetTool.name, args: argsCleaned, result: execResult });
+            post("INTENT_TOOL_DONE", { requestId });
+            return;
+          } catch (e) {
+            console.error(`${TAG} Tool execution failed`, e);
+            // fall through to LOCATE_AND_MODIFY/style as a safe default below
+          }
+        }
+        job.jobType = "LOCATE_AND_MODIFY";
+        job.operation = "style";
+      }
+
+      // ── TRANSFORM_AND_REPLACE ──────────────────────────────────────────
+      // Whole boundary is raw material. Generate replacement HTML and swap
+      // the entire subtree — no per-node mapping, old structure discarded.
+      if (job.jobType === "TRANSFORM_AND_REPLACE") {
+        const regenPrompt =
+          `User request: "${prompt}"\n` +
+          `Original HTML (the boundary to replace):\n${html}\n\n` +
+          `Generate the replacement HTML for this entire boundary that satisfies the request. ` +
+          `Use only simple, safe tags (p, ul, li, span, strong, em, h1-h6, br). ` +
+          `Do not include script, style, or event-handler attributes. ` +
+          `Output ONLY the replacement HTML fragment, no markdown fences, no commentary.`;
+        try {
+          const regenResult = await sharedIntentSession.prompt(regenPrompt);
+          const regenCleaned = regenResult.replace(/```html/g, "").replace(/```/g, "").trim();
+          console.log(`[MyTake-Dataset] Regenerate for "${prompt}":`, { prompt: regenPrompt, result: regenCleaned });
+          post("INTENT_REGENERATE_DONE", { requestId, html: regenCleaned });
+        } catch (e) {
+          console.error(`${TAG} Regenerate failed`, e);
+          post("INTENT_FAIL", { requestId, error: e.message || "Regenerate failed" });
+        }
+        return;
+      }
+
+      // ── LOCATE_AND_MODIFY: text_pattern ──────────────────────────────────
+      // Substring-level target inside the text (not whole text nodes).
+      if (job.jobType === "LOCATE_AND_MODIFY" && job.operation === "text_pattern") {
+        const patternPrompt =
+          `User request: "${prompt}"\n` +
+          `Text: "${text}"\n\n` +
+          `Find every exact substring in the text that the request refers to, and the ` +
+          `exact replacement text for each (replacement may equal the original substring ` +
+          `if the request only asks for styling, e.g. underlining — in that case set ` +
+          `"style" instead of changing "replacement").\n` +
+          `Output ONLY JSON, no markdown:\n` +
+          `{"matches": [{"original": "<exact substring from text>", "replacement": "<new text, or same as original if unchanged>", "style": {<optional CSS properties to apply to just this substring>} }]}`;
+        try {
+          const patternResult = await sharedIntentSession.prompt(patternPrompt);
+          const patternCleaned = patternResult.replace(/```json/g, "").replace(/```/g, "").trim();
+          console.log(`[MyTake-Dataset] Pattern match for "${prompt}":`, { prompt: patternPrompt, result: patternCleaned });
+          post("INTENT_PATTERN_DONE", { requestId, matches: patternCleaned });
+        } catch (e) {
+          console.error(`${TAG} Pattern match failed`, e);
+          post("INTENT_FAIL", { requestId, error: e.message || "Pattern match failed" });
+        }
+        return;
+      }
+
+      // ── LOCATE_AND_MODIFY: style (existing path) ─────────────────────────
+      if (job.jobType === "LOCATE_AND_MODIFY" && job.operation === "style") {
+        const uiPrompt = `User prompt: "${prompt}"\nHTML: ${html}\nGenerate inline CSS styles to satisfy prompt. Output ONLY JSON mapping CSS properties to values, e.g. {"backgroundColor": "red"}. No markdown.`;
+        const uiResult = await sharedIntentSession.prompt(uiPrompt);
+        const uiCleaned = uiResult.replace(/```json/g, "").replace(/```/g, "").trim();
+        console.log(`[MyTake-Dataset] UI Generation for "${prompt}":`, { prompt: uiPrompt, result: uiCleaned });
+        post("INTENT_UI_DONE", { requestId, css: uiCleaned });
+        return;
+      }
+
+      // ── LOCATE_AND_MODIFY: rephrase (existing default path) ──────────────
+      post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
+    } catch(err) {
+       console.warn(`${TAG} Intent analyzer failed, falling back to TEXT`, err);
+       if (err.message && err.message.includes("destroyed")) {
+           sharedIntentSession = null;
+       }
+       post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
     }
   }
 
@@ -320,6 +512,7 @@
 
         const final = accumulated.trim();
         if (final && final.length > 1) {
+          console.log(`[MyTake-Dataset] LLM Stream Completed:`, { input: prompt, output: final });
           post(`${typePrefix}_DONE`, { requestId, text: final });
         } else {
           post(`${typePrefix}_FAIL`, {
@@ -348,6 +541,7 @@
       const result = await sharedSession.prompt(prompt);
       const trimmed = result?.trim();
       if (trimmed && trimmed.length > 1) {
+        console.log(`[MyTake-Dataset] LLM Prompt Completed:`, { input: prompt, output: trimmed });
         post(`${typePrefix}_DONE`, { requestId, text: trimmed });
       } else {
         post(`${typePrefix}_FAIL`, { requestId, error: "Bad result" });
@@ -372,8 +566,10 @@
   let currentIntensity = 2;
 
   function buildRephrasePrompt(text, moodKey, customPromptStr, intensity) {
-    let style =
-      customPromptStr || MOOD_PROMPTS[moodKey] || MOOD_PROMPTS.explain;
+    if (customPromptStr) {
+      return `Instruction: ${customPromptStr}\n\nApply this instruction to the following text. Output ONLY the result, without any extra text, quotes, or commentary. Format it properly according to the instruction (e.g. use newlines for lists):\n\n${text}`;
+    }
+    let style = MOOD_PROMPTS[moodKey] || MOOD_PROMPTS.explain;
     if (intensity === 1)
       style += " Be extremely subtle — change only 2–3 words max.";
     else if (intensity === 3)
@@ -402,6 +598,10 @@
       post("REPHRASE_FAIL", { requestId, error: "Empty text" });
       return;
     }
+    if (text.length > 2500) {
+      post("REPHRASE_FAIL", { requestId, error: "Context window breached select something smaller" });
+      return;
+    }
     const prompt = buildRephrasePrompt(text, null, systemPrompt, 2);
     enqueue({ requestId, prompt, typePrefix: "REPHRASE" });
   }
@@ -411,14 +611,178 @@
       post("COMMAND_FAIL", { requestId, error: "Empty input" });
       return;
     }
+    if (text.length > 2500) {
+      post("COMMAND_FAIL", { requestId, error: "Context window breached select something smaller" });
+      return;
+    }
     const prompt = `Command: ${commandText}\nText: "${text}"\nApply the command to the text. Output ONLY the result, no commentary:`;
     enqueue({ requestId, prompt, typePrefix: "COMMAND" });
   }
 
+  async function handleAskPage(requestId, question, pageContext, attachedFiles = []) {
+    console.log(`${TAG} Starting ASK for ${requestId}`);
+    const lm = getAPI();
+    if (!lm) {
+      post("ASK_PAGE_FAIL", { requestId, error: "AI not available. Make sure Chrome's built-in AI (Gemini Nano) is enabled." });
+      return;
+    }
+    try {
+      if (sharedAskSession && lastPageContext !== pageContext) {
+          console.log(`${TAG} Page context changed, destroying old AskSession.`);
+          sharedAskSession.destroy();
+          sharedAskSession = null;
+      }
+
+      if (!sharedAskSession) {
+        // Send a "creating session" stream update so user sees progress
+        post("ASK_PAGE_STREAM", { requestId, text: "__LOADING_SPINNER__" });
+        try {
+          const sysPrompt = `You are a helpful AI assistant. You analyze webpages and attached files. The user will ask questions. Smartly determine whether the question relates to the webpage, the attached files, or both. Use ALL provided context to answer accurately. Be concise and use markdown formatting. Always reference attached file content when files are provided.`;
+          
+          sharedAskSession = await lm.create({
+            systemPrompt: sysPrompt,
+            temperature: 0.2,
+            expectedLanguage: "en", outputLanguage: "en",
+            monitor(m) {
+              m.addEventListener("downloadprogress", e => {
+                // post("ASK_PAGE_STREAM", { requestId, text: `__LOADING_SPINNER__` });
+                console.log(`${TAG} AskSession download: ${e.loaded}/${e.total}`);
+              });
+            }
+          });
+          lastPageContext = pageContext;
+        } catch (e) {
+          console.warn(`${TAG} Standard Ask AI create failed, trying fallback with initialPrompts:`, e.message);
+          try {
+            sharedAskSession = await lm.create({
+              initialPrompts: [{
+                role: 'system',
+                content: `You are a helpful AI assistant analyzing a webpage. The user will ask questions about it. Use the provided webpage context to answer accurately. Be concise and use markdown formatting.`
+              }],
+              expectedLanguage: "en", outputLanguage: "en"
+            });
+          } catch (e2) {
+            console.warn(`${TAG} initialPrompts fallback also failed, using bare session:`, e2.message);
+            sharedAskSession = await lm.create({ expectedLanguage: "en", outputLanguage: "en" });
+          }
+          lastPageContext = pageContext;
+        }
+        console.log(`${TAG} AskSession created successfully`);
+      }
+      
+      // Smart context budgeting: Gemini Nano has limited context (~4k tokens ≈ ~12k chars).
+      // Reserve space for files first, then fill remaining with page context.
+      const PROMPT_BUDGET = 10000;
+      let prompt = "";
+      let usedChars = 0;
+
+      // 1) Attached files get priority
+      if (attachedFiles && attachedFiles.length > 0) {
+        prompt += `--- ATTACHED FILES ---\n`;
+        attachedFiles.forEach(f => {
+           const fileContent = f.content.substring(0, 4000);
+           prompt += `[File: ${f.name}]\n${fileContent}\n\n`;
+           usedChars += fileContent.length + f.name.length + 20;
+        });
+      }
+
+      // 2) Page context gets remaining budget
+      if (pageContext && pageContext.trim().length > 0) {
+        const remainingBudget = Math.max(1500, PROMPT_BUDGET - usedChars - 500);
+        const trimmedContext = pageContext.substring(0, remainingBudget);
+        prompt += `--- WEBPAGE CONTEXT ---\n${trimmedContext}\n\n`;
+      }
+
+      // 3) User question last
+      prompt += `--- USER QUESTION ---\n${question}\n\nAnswer using BOTH the webpage context AND any attached files provided above. If files are attached, make sure to reference their content in your answer. If the user refers to "this" or "the page", they mean the webpage context.`;
+
+      if (typeof sharedAskSession.promptStreaming === "function") {
+        const controller = new AbortController();
+        activeAskControllers[requestId] = controller;
+        let accumulated = "";
+        let lastSent = "";
+
+        try {
+          console.log(`${TAG} Calling promptStreaming...`);
+          const stream = sharedAskSession.promptStreaming(prompt, { signal: controller.signal });
+          console.log(`${TAG} promptStreaming returned, iterating...`);
+
+          for await (const chunk of stream) {
+            console.log(`${TAG} Stream chunk received (length: ${chunk?.length})`);
+            const cur = typeof chunk === "string" ? chunk : String(chunk);
+            if (cur.startsWith(accumulated)) accumulated = cur;
+            else accumulated += cur;
+            const t = accumulated;
+            if (t && t !== lastSent) {
+              lastSent = t;
+              post("ASK_PAGE_STREAM", { requestId, text: t });
+            }
+          }
+          console.log(`${TAG} Stream completed.`);
+          const final = accumulated.trim();
+          delete activeAskControllers[requestId];
+          if (final) {
+            post("ASK_PAGE_DONE", { requestId, text: final });
+          } else {
+            post("ASK_PAGE_FAIL", { requestId, error: "Empty stream output" });
+          }
+          return;
+        } catch (err) {
+          delete activeAskControllers[requestId];
+          console.error(`${TAG} promptStreaming caught error:`, err);
+          
+          if (err === "USER_ABORT" || (err && err.name === "AbortError" && controller.signal.reason === "USER_ABORT")) {
+             post("ASK_PAGE_DONE", { requestId, text: (accumulated + "\n\n*(Stopped)*").trim() });
+             return;
+          }
+          
+          const errStr = err?.message || String(err) || "";
+          if (errStr.includes("destroyed") || errStr.includes("InvalidStateError") || errStr.includes("kErrorUnknown")) {
+             sharedAskSession = null;
+             post("ASK_PAGE_FAIL", { requestId, error: "The AI model crashed or the session was destroyed. The selected element may be too large or complex. Try highlighting a smaller area." });
+             return;
+          }
+          
+          if (err === "TIMEOUT" || err.name === "AbortError") {
+             console.warn(`${TAG} Stream was aborted, falling back to prompt()`);
+          } else {
+             throw err;
+          }
+        }
+      }
+
+      console.log(`${TAG} Calling prompt (fallback)...`);
+      const result = await sharedAskSession.prompt(prompt);
+      console.log(`${TAG} prompt returned:`, result);
+      if (result && result.trim()) {
+        post("ASK_PAGE_DONE", { requestId, text: result.trim() });
+      } else {
+        post("ASK_PAGE_FAIL", { requestId, error: "Bad result" });
+      }
+    } catch (err) {
+      delete activeAskControllers[requestId];
+      
+      const errStr = err?.message || String(err) || "";
+      if (errStr.includes("destroyed") || errStr.includes("InvalidStateError") || errStr.includes("kErrorUnknown")) {
+          sharedAskSession = null;
+          console.error(`${TAG} Ask failed due to model crash:`, errStr);
+          post("ASK_PAGE_FAIL", { requestId, error: "The AI model crashed or the session was destroyed. The selected element may be too large or complex. Try highlighting a smaller area." });
+      } else {
+          console.error(`${TAG} Ask failed`, err);
+          post("ASK_PAGE_FAIL", { requestId, error: errStr });
+      }
+    }
+  }
+
+  let sessionNonce = null;
+
   function post(type, data) {
+    if (!sessionNonce) {
+      sessionNonce = document.documentElement.dataset.mytakeNonce;
+    }
     window.postMessage(
-      { channel: CHANNEL, direction: "TO_ISOLATED", type, ...data },
-      "*",
+      { channel: CHANNEL, direction: "TO_ISOLATED", type, nonce: sessionNonce, ...data },
+      "*"
     );
   }
 
@@ -427,6 +791,14 @@
     if (e.source !== window) return;
     const msg = e.data;
     if (!msg || msg.channel !== CHANNEL || msg.direction !== "TO_MAIN") return;
+    
+    if (!sessionNonce) {
+      sessionNonce = document.documentElement.dataset.mytakeNonce;
+    }
+    if (msg.nonce !== sessionNonce) {
+      console.warn("[MyTake] Main world rejected message with invalid nonce");
+      return;
+    }
 
     switch (msg.type) {
       case "INIT_SESSION":
@@ -452,8 +824,28 @@
         handleTargetRephrase(msg.requestId, msg.text, msg.systemPrompt);
         break;
 
+      case "INTENT_REQUEST":
+        enqueue({
+          requestId: msg.requestId,
+          prompt: msg.prompt,
+          text: msg.text,
+          html: msg.html,
+          typePrefix: "INTENT"
+        });
+        break;
+
       case "COMMAND_REQUEST":
         handleCommand(msg.requestId, msg.text, msg.commandText);
+        break;
+
+      case "ASK_PAGE_REQUEST":
+        handleAskPage(msg.requestId, msg.question, msg.pageContext, msg.attachedFiles);
+        break;
+
+      case "ASK_PAGE_ABORT":
+        if (activeAskControllers[msg.requestId]) {
+           activeAskControllers[msg.requestId].abort("USER_ABORT");
+        }
         break;
 
       case "DESTROY_SESSION":

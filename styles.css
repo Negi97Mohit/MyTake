@@ -1422,11 +1422,27 @@ body.mytake-target-active * {
 
 /* Processing overlay on targeted element */
 .mytake-target-processing {
-  outline: 2px solid hsl(200 80% 55%) !important;
-  outline-offset: 2px !important;
-  background: hsl(200 80% 55% / 0.04) !important;
-  position: relative;
+  outline: 3px solid #ff3366 !important;
+  outline-offset: 4px !important;
+  border-radius: 4px !important;
+  background: rgba(255, 51, 102, 0.1) !important;
+  animation: mytakeGlow 1.5s ease-in-out infinite alternate !important;
+  transition: all 0.2s ease !important;
+  position: relative !important;
+  z-index: 2147483646 !important;
 }
+
+@keyframes mytakeGlow {
+  from {
+    outline-color: rgba(255, 51, 102, 0.5);
+    box-shadow: 0 0 10px rgba(255, 51, 102, 0.2), inset 0 0 10px rgba(255, 51, 102, 0.1);
+  }
+  to {
+    outline-color: rgba(255, 51, 102, 1);
+    box-shadow: 0 0 20px rgba(255, 51, 102, 0.6), inset 0 0 20px rgba(255, 51, 102, 0.3);
+  }
+}
+
 .mytake-target-processing::after {
   content: "✦ Processing…";
   position: absolute;
@@ -1517,4 +1533,209 @@ body.mytake-target-active * {
 .manual-content strong {
   color: var(--text);
   font-weight: 600;
+}
+
+/* ── Floating Prompt Widget ─────────────────────────────────────────── */
+#mytake-floating-widget {
+  position: absolute;
+  z-index: 2147483647; /* max z-index */
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  padding: 12px;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #111;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.mytake-widget-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mytake-widget-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mytake-widget-status {
+  font-size: 11px;
+  font-weight: 500;
+  color: #666;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(0,0,0,0.05);
+}
+
+.mytake-widget-status.applying {
+  color: #0066cc;
+  background: rgba(0, 102, 204, 0.1);
+  animation: pulse 1.5s infinite;
+}
+
+.mytake-widget-status.error {
+  color: #cc0000;
+  background: rgba(204, 0, 0, 0.1);
+}
+
+.mytake-widget-close {
+  cursor: pointer;
+  background: none;
+  border: none;
+  font-size: 14px;
+  color: #888;
+  padding: 4px;
+}
+
+.mytake-widget-close:hover {
+  color: #111;
+}
+
+.mytake-widget-input-wrapper {
+  display: flex;
+  gap: 6px;
+}
+
+.mytake-widget-input {
+  flex: 1;
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  background: rgba(255,255,255,0.9);
+  outline: none;
+}
+
+.mytake-widget-input:focus {
+  border-color: #0066cc;
+  box-shadow: 0 0 0 2px rgba(0,102,204,0.2);
+}
+
+.mytake-widget-btn {
+  background: #111;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 0 12px;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mytake-widget-btn:hover {
+  background: #333;
+}
+
+.mytake-widget-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+/* ── DOM Target Highlights ─────────────────────────────────────────── */
+.mytake-target-locked {
+  outline: 2px solid #0066cc !important;
+  outline-offset: 2px !important;
+  border-radius: 4px !important;
+  transition: outline 0.2s ease;
+}
+
+.mytake-target-processing {
+  outline: 2px dashed #0066cc !important;
+  outline-offset: 2px !important;
+  border-radius: 4px !important;
+  opacity: 0.7;
+  animation: processingPulse 1.5s infinite;
+}
+
+@keyframes processingPulse {
+  0% { opacity: 0.7; }
+  50% { opacity: 0.4; }
+  100% { opacity: 0.7; }
+}
+/* --- Custom Prompt Section in Popup --- */
+.custom-prompt-section {
+  margin: 16px 0;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+}
+
+.custom-prompt-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.custom-prompt-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #0f172a;
+  background: #fff;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 40px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.custom-prompt-input:focus {
+  border-color: #a78bfa;
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.2);
+}
+
+.custom-prompt-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.custom-prompt-btn {
+  flex: 1;
+  padding: 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.2s;
+}
+
+.custom-prompt-btn.run-btn-small {
+  background: #111;
+  color: #fff;
+}
+
+.custom-prompt-btn.run-btn-small:hover {
+  background: #333;
+}
+
+.custom-prompt-btn.target-btn-small {
+  background: #fff;
+  color: #111;
+  border-color: #cbd5e1;
+}
+
+.custom-prompt-btn.target-btn-small:hover {
+  background: #f1f5f9;
 }

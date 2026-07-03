@@ -5,9 +5,13 @@
 const DEFAULT_MOOD = "original";
 const DEFAULT_MODE = "manual";
 const DEFAULT_INTENSITY = 2;
-const DEFAULT_THEME = "dark";
+const DEFAULT_THEME = "system";
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'install') {
+    chrome.tabs.create({ url: 'onboarding.html' });
+  }
+
   chrome.storage.local.set({
     mood: DEFAULT_MOOD,
     enabled: true,
@@ -175,6 +179,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return true;
 
+    case "INJECT_PDF_JS":
+      chrome.scripting.executeScript({
+         target: { tabId: sender.tab.id },
+         files: ["lib/pdf/pdf.min.js"],
+         world: "ISOLATED"
+      }, () => {
+         sendResponse({ ok: true });
+      });
+      return true;
+
     // ── Custom Moods CRUD ─────────────────────────────────────────
     case "SAVE_CUSTOM_MOOD":
       chrome.storage.local.get(["custom_moods"], (data) => {
@@ -203,93 +217,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return true;
 
+    // ── Track AI Status ───────────────────────────────────────────
+    case "AI_STATUS_UPDATE":
+      chrome.storage.local.set({
+        aiAvailable: msg.available,
+        aiError: msg.error
+      });
+      return false;
+
     default:
       return false;
   }
 });
 
 // ── Gemini Nano auto-update ──────────────────────────────────────────────
-// When the model process has crashed too many times, Chrome blacklists it.
-// Opening chrome://components and triggering a check resets this IF a newer
-// model version is available. We open the page briefly in a background tab,
-// wait for it to load, then close it — fully silent to the user.
+// This feature has been disabled to prevent the extension from opening
+// chrome:// URLs in the background.
 let updateInProgress = false;
 
 function triggerGeminiNanoUpdate() {
-  if (updateInProgress) return;
-  updateInProgress = true;
-  console.log("[MyTake BG] Requesting Gemini Nano component update...");
-
-  chrome.tabs.create({ url: "chrome://components", active: false }, (tab) => {
-    if (!tab?.id) {
-      updateInProgress = false;
-      return;
-    }
-
-    // Wait for the page to fully load, then inject a click on
-    // the "Check for update" button for the On Device Model component.
-    // We use a short delay since chrome:// pages load fast.
-    setTimeout(() => {
-      chrome.scripting
-        .executeScript({
-          target: { tabId: tab.id },
-          func: () => {
-            // Find the Optimization Guide On Device Model component
-            const cards = document.querySelectorAll(
-              '.component-card, [id^="opt"]',
-            );
-            for (const card of cards) {
-              const text = card.textContent || "";
-              if (
-                text.includes("Optimization Guide On Device Model") ||
-                text.includes("optimization-guide")
-              ) {
-                const btn = card.querySelector("button");
-                if (btn) {
-                  btn.click();
-                  return "clicked";
-                }
-              }
-            }
-            // Fallback: click all "Check for update" buttons on the page
-            let clicked = 0;
-            document.querySelectorAll("button").forEach((btn) => {
-              if (
-                btn.textContent
-                  .trim()
-                  .toLowerCase()
-                  .includes("check for update")
-              ) {
-                btn.click();
-                clicked++;
-              }
-            });
-            return clicked > 0
-              ? `clicked ${clicked} buttons`
-              : "no button found";
-          },
-        })
-        .then((results) => {
-          console.log(
-            "[MyTake BG] Component update result:",
-            results?.[0]?.result,
-          );
-        })
-        .catch((err) => {
-          console.warn(
-            "[MyTake BG] Could not click update button:",
-            err.message,
-          );
-        })
-        .finally(() => {
-          // Close the tab after 4s regardless of outcome
-          setTimeout(() => {
-            chrome.tabs.remove(tab.id).catch(() => {});
-            updateInProgress = false;
-          }, 4000);
-        });
-    }, 2000); // wait 2s for chrome://components to render
-  });
+  console.log("[MyTake BG] triggerGeminiNanoUpdate called, but disabled to prevent opening chrome:// URLs.");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

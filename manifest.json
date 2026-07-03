@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "MyTake",
-  "version": "2.0.0",
-  "description": "Your browser, Your tone/ mood — powered by Chrome's built-in Nano AI.",
+  "version": "2.2.1",
+  "description": "Shape the web's tone to match yours — powered by Chrome's built-in Gemini Nano AI.",
   "permissions": ["storage", "scripting", "tabs"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
@@ -10,13 +10,13 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["http://*/*", "https://*/*"],
       "js": ["content-main.js"],
       "run_at": "document_idle",
       "world": "MAIN"
     },
     {
-      "matches": ["<all_urls>"],
+      "matches": ["http://*/*", "https://*/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
@@ -33,5 +33,11 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/pdf/*"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
 }

@@ -2,302 +2,263 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MyTake</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css" />
+    <style>
+      :root {
+        --bg-color: rgba(20, 20, 20, 0.92);
+        --text-main: #e0e0e0;
+        --text-muted: #888;
+        --border-color: rgba(255, 255, 255, 0.08);
+        --accent: #a78bfa;
+        --accent-hover: #c084fc;
+        --pill-bg: rgba(255, 255, 255, 0.1);
+        --pill-text: #ccc;
+      }
+      
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg-color: rgba(255, 255, 255, 0.95);
+          --text-main: #111;
+          --text-muted: #666;
+          --border-color: rgba(0, 0, 0, 0.08);
+          --accent: #1a73e8;
+          --accent-hover: #1557b0;
+          --pill-bg: rgba(0, 0, 0, 0.05);
+          --pill-text: #555;
+        }
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html { background: #000; }
+      @media (prefers-color-scheme: light) {
+        html { background: #fff; }
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg-color);
+        color: var(--text-main);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        width: 320px;
+        overflow-x: hidden;
+        margin: 0;
+      }
+
+      /* ── Header ── */
+      .mt-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 16px 20px 12px;
+        border-bottom: 1px solid var(--border-color);
+      }
+      .mt-title { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; }
+      .mt-status-pill {
+        font-size: 10px; font-weight: 600; padding: 4px 10px; border-radius: 20px;
+        text-transform: uppercase; letter-spacing: 0.5px;
+        background: var(--pill-bg); color: var(--pill-text);
+      }
+      .mt-status-pill.active { background: rgba(52,211,153,0.15); color: #10b981; }
+      .mt-status-pill.error  { background: rgba(239,68,68,0.15); color: #ef4444; }
+
+      /* ── Error State ── */
+      #error-state { display: none; padding: 20px; }
+      .err-title { font-size: 13px; font-weight: 600; margin-bottom: 12px; }
+      .err-steps { padding-left: 16px; color: var(--text-muted); font-size: 12px; line-height: 1.6; margin-bottom: 16px; }
+      .err-steps li { margin-bottom: 6px; }
+      .err-steps code { font-family: ui-monospace, monospace; font-size: 11px; background: var(--pill-bg); padding: 2px 4px; border-radius: 4px; }
+      .btn-check {
+        display: block; width: 100%; padding: 10px; border: none; border-radius: 8px;
+        background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; font-size: 12px;
+        transition: background 0.2s;
+      }
+      .btn-check:hover { background: var(--accent-hover); }
+
+      /* ── Active State ── */
+      #active-state { display: none; }
+
+      /* Tab Bar */
+      .mt-tabs {
+        display: flex; border-bottom: 1px solid var(--border-color);
+        padding: 0 12px;
+      }
+      .mt-tab {
+        flex: 1; padding: 12px 0; text-align: center;
+        font-size: 11px; font-weight: 600; color: var(--text-muted);
+        cursor: pointer; border-bottom: 2px solid transparent;
+        transition: color 0.2s, border-color 0.2s;
+        text-transform: uppercase; letter-spacing: 0.5px;
+      }
+      .mt-tab:hover { color: var(--text-main); }
+      .mt-tab.active { color: var(--text-main); border-bottom-color: var(--text-main); }
+
+      /* Panels */
+      .mt-panel { display: none; padding: 20px; animation: fadeIn 0.2s ease; }
+      .mt-panel.active { display: block; }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
+
+      .section-title {
+        font-size: 11px; font-weight: 600; text-transform: uppercase;
+        color: var(--text-muted); letter-spacing: 0.6px; margin-bottom: 12px;
+      }
+      .minimal-list {
+        list-style: none;
+      }
+      .minimal-list li {
+        font-size: 13px; color: var(--text-main); line-height: 1.5; margin-bottom: 12px;
+        position: relative;
+        padding-left: 14px;
+      }
+      .minimal-list li::before {
+        content: "·"; color: var(--accent); font-weight: bold; font-size: 16px; line-height: 1;
+        position: absolute;
+        left: 0;
+        top: -1px;
+      }
+      
+      .kbd {
+        display: inline-block; padding: 2px 6px; border-radius: 4px;
+        background: var(--pill-bg); border: 1px solid var(--border-color);
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px;
+        color: var(--text-main); margin: 0 2px;
+      }
+
+      .shortcut-row {
+        display: flex; justify-content: space-between; align-items: center;
+        font-size: 12px; color: var(--text-main); margin-bottom: 10px;
+        padding-bottom: 10px; border-bottom: 1px solid var(--border-color);
+      }
+      .shortcut-row:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+      .shortcut-keys { display: flex; gap: 4px; }
+
+      /* Footer */
+      .mt-footer {
+        padding: 12px 20px; text-align: center;
+        border-top: 1px solid var(--border-color);
+        font-size: 11px; color: var(--text-muted);
+        display: flex; align-items: center; justify-content: center; gap: 4px;
+      }
+      .mt-footer .heart { display: inline-flex; align-items: center; animation: heartbeat 1.2s ease-in-out infinite; }
+      @keyframes heartbeat {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.25); }
+      }
+      .author-link { color: var(--text-main); text-decoration: none; font-weight: 600; transition: color 0.2s; }
+      .author-link:hover { color: var(--accent); }
+
+      /* Toggle Switch */
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 36px;
+        height: 20px;
+      }
+      .switch input { opacity: 0; width: 0; height: 0; }
+      .slider {
+        position: absolute; cursor: pointer;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background-color: #ef4444;
+        transition: .3s; border-radius: 20px;
+      }
+      .slider:before {
+        position: absolute; content: "";
+        height: 16px; width: 16px;
+        left: 2px; bottom: 2px;
+        background-color: white;
+        transition: .3s; border-radius: 50%;
+      }
+      input:checked + .slider { background-color: #10b981; }
+      input:checked + .slider:before { transform: translateX(16px); }
+    </style>
   </head>
-  <body data-mood="original">
-    <!-- Soft ambient gradient that shifts with mood -->
-    <div class="ambient" aria-hidden="true"></div>
-
-    <!-- AI Onboarding / Disclaimer Overlay — covers the entire popup if Gemini Nano is not ready -->
-    <div class="disclaimer-overlay" id="disclaimer-overlay">
-      <div class="disclaimer-content">
-        <h1 class="disclaimer-title" id="disclaimer-title">Chrome AI Setup Required</h1>
-        <ol class="disclaimer-steps" id="disclaimer-steps">
-          <li>Checking system configuration...</li>
-        </ol>
-        <div class="disclaimer-detail" id="disclaimer-detail"></div>
-        <details class="disclaimer-troubleshooting" id="disclaimer-troubleshooting">
-          <summary>Hardware & WebGPU Troubleshooting</summary>
-          <div>
-            <p style="margin-top: 6px; line-height: 1.4; font-size: 10.5px;">If you meet requirements but still see errors, verify:</p>
-            <ol style="margin-top: 4px; padding-left: 14px; font-size: 10.5px;">
-              <li style="margin-bottom: 2px;">Turn on <b>graphics acceleration</b> in Chrome Settings (under System).</li>
-              <li style="margin-bottom: 2px;">Enable WebGPU override in <b>chrome://flags/#enable-unsafe-webgpu</b>.</li>
-              <li>Verify support at <a href="https://webgpureport.org" target="_blank" style="color: inherit; text-decoration: underline;">webgpureport.org</a>.</li>
-            </ol>
-          </div>
-        </details>
-      </div>
+  <body>
+    <div class="mt-header">
+      <div class="mt-title">MyTake</div>
+      <div class="mt-status-pill" id="status-pill">…</div>
     </div>
 
-    <!-- Hidden tabs (popup.js still references them) -->
-    <div class="tab-bar" hidden aria-hidden="true">
-      <button class="tab-btn active" data-tab="mood">Mood</button>
-      <button class="tab-btn tab-disabled" data-tab="commands">
-        Commands<span class="tab-badge">WIP</span>
-      </button>
+    <div id="error-state">
+      <div class="err-title">AI Unavailable</div>
+      <ul class="err-steps">
+        <li>Enable <code>prompt-api-for-gemini-nano</code> in Chrome flags.</li>
+        <li>Enable <code>optimization-guide-on-device-model</code>.</li>
+        <li>Relaunch Chrome.</li>
+      </ul>
+      <button class="btn-check" id="btn-recheck">Check Again</button>
     </div>
 
-    <div id="main-content">
-      <div class="tab-content active" id="tab-mood">
-        <!-- Headline -->
-        <h1 class="prompt-title">Choose your tone</h1>
-
-        <!-- Clover mood orb (3-leaf, hearts + stem) -->
-        <div class="globe-container">
-          <div class="globe-ring" id="globe-ring">
-            <svg class="clover" viewBox="-60 -60 120 130" aria-hidden="true">
-              <defs>
-                <radialGradient id="leafGrad" cx="50%" cy="38%" r="65%">
-                  <stop offset="0%" stop-color="hsl(var(--mood-h) 100% 82%)" />
-                  <stop
-                    offset="55%"
-                    stop-color="hsl(var(--mood-h) var(--mood-s) 55%)"
-                  />
-                  <stop
-                    offset="100%"
-                    stop-color="hsl(var(--mood-h) var(--mood-s) 35%)"
-                  />
-                </radialGradient>
-                <linearGradient id="stemGrad" x1="0" x2="0" y1="0" y2="1">
-                  <stop
-                    offset="0%"
-                    stop-color="hsl(var(--mood-h) var(--mood-s) 38%)"
-                  />
-                  <stop
-                    offset="100%"
-                    stop-color="hsl(var(--mood-h) var(--mood-s) 28%)"
-                  />
-                </linearGradient>
-              </defs>
-              <!-- stem -->
-              <path
-                d="M0 8 Q 6 30 2 60"
-                stroke="url(#stemGrad)"
-                stroke-width="4"
-                stroke-linecap="round"
-                fill="none"
-              />
-              <!-- 3 heart leaflets -->
-              <g class="clover-leaf">
-                <path
-                  d="M0 0 C -22 -8, -28 -34, -10 -38 C -2 -40, 0 -32, 0 -26 C 0 -32, 2 -40, 10 -38 C 28 -34, 22 -8, 0 0 Z"
-                  fill="url(#leafGrad)"
-                />
-              </g>
-              <g class="clover-leaf" style="transform: rotate(120deg)">
-                <path
-                  d="M0 0 C -22 -8, -28 -34, -10 -38 C -2 -40, 0 -32, 0 -26 C 0 -32, 2 -40, 10 -38 C 28 -34, 22 -8, 0 0 Z"
-                  fill="url(#leafGrad)"
-                />
-              </g>
-              <g class="clover-leaf" style="transform: rotate(240deg)">
-                <path
-                  d="M0 0 C -22 -8, -28 -34, -10 -38 C -2 -40, 0 -32, 0 -26 C 0 -32, 2 -40, 10 -38 C 28 -34, 22 -8, 0 0 Z"
-                  fill="url(#leafGrad)"
-                />
-              </g>
-              <circle cx="0" cy="0" r="3.5" fill="hsl(var(--mood-h) 90% 92%)" />
-            </svg>
-            <div class="globe-hue" id="globe-hue"></div>
-            <div class="globe-sphere" id="globe-sphere"></div>
-          </div>
-        </div>
-
-        <!-- Mood name + desc -->
-        <div class="mood-meta">
-          <div class="globe-label" id="globe-label">Original</div>
-          <div class="globe-desc" id="globe-desc">View original text (Off)</div>
-        </div>
-
-        <!-- Mood pill chips (carousel container repurposed) -->
-        <div class="carousel-wrapper">
-          <button class="carousel-arrow" id="carousel-prev" hidden>
-            &#8249;
-          </button>
-          <div class="carousel-viewport">
-            <div class="carousel-track" id="carousel-track"></div>
-          </div>
-          <button class="carousel-arrow" id="carousel-next" hidden>
-            &#8250;
-          </button>
-        </div>
-
-        <!-- Intensity slider removed -->
-        <input type="hidden" id="degree-slider" value="2" />
-        <span id="intensity-badge" hidden></span>
-
-        <!-- Mode pill (compact) -->
-        <div class="mode-row">
-          <div class="mode-switch">
-            <button class="mode-opt active" data-mode="manual">Manual</button>
-            <button
-              class="mode-opt"
-              data-mode="target"
-              title="Click any area on the page to apply a mood to just that section"
-            >
-              <span class="target-icon">⊕</span> Target
-            </button>
-          </div>
-          <div class="aux-controls">
-            <button
-              id="pause-btn"
-              title="Pause"
-              disabled
-              aria-label="Pause"
-            ></button>
-            <button
-              id="restart-btn"
-              title="Restart"
-              aria-label="Restart"
-            ></button>
-          </div>
-        </div>
-
-        <!-- Target Mode Banner -->
-        <div class="target-banner" id="target-banner" hidden>
-          <span class="target-banner-icon">⊕</span>
-          <span>Target mode active — click any area on the page</span>
-          <button
-            class="target-banner-exit"
-            id="target-exit-btn"
-            title="Exit target mode"
-          >
-            ✕
-          </button>
-        </div>
-
-        <!-- Primary CTA -->
-        <button class="run-btn" id="trigger-btn">Run</button>
+    <div id="active-state">
+      <div class="mt-tabs">
+        <div class="mt-tab active" data-tab="moods">Moods</div>
+        <div class="mt-tab" data-tab="target">Target</div>
+        <div class="mt-tab" data-tab="ask">Ask</div>
+        <div class="mt-tab" data-tab="shortcuts">Keys</div>
       </div>
 
-      <!-- Commands Tab (kept, hidden) -->
-      <div class="tab-content" id="tab-commands" hidden>
-        <div class="construction-container">
-          <div class="construction-icon">🚧</div>
-          <div class="construction-badge">COMING SOON</div>
-          <div class="construction-title">Under Construction</div>
-          <div class="construction-desc">
-            Custom AI commands and unit transformations are coming soon.
-          </div>
+      <div class="mt-panel active" id="panel-moods">
+        <div class="section-title">How It Works</div>
+        <ul class="minimal-list">
+          <li>Open the panel via the floating button on any page.</li>
+          <li>Select a mood or create your own custom style.</li>
+          <li>The page updates instantly. Adjust the intensity slider to control the effect.</li>
+        </ul>
+        <div class="shortcut-row" style="margin-top: 16px;">
+          <span>Show Floating Button</span>
+          <label class="switch">
+            <input type="checkbox" id="toggle-floating-btn" />
+            <span class="slider"></span>
+          </label>
         </div>
-        <div style="display: none">
-          <div class="cmd-input-row">
-            <input type="text" class="cmd-input" id="cmd-input" />
-            <button class="cmd-run-btn" id="cmd-run-btn">→</button>
-          </div>
-          <div class="cmd-list" id="cmd-list"></div>
-          <div class="cmd-bulk-row" id="cmd-bulk-row" style="display: none">
-            <button class="cmd-bulk-btn" id="cmd-run-selected">
-              Run Selected
-            </button>
-            <button class="cmd-bulk-btn" id="cmd-run-all">Run All</button>
-          </div>
+      </div>
+
+      <div class="mt-panel" id="panel-target">
+        <div class="section-title">Target Mode</div>
+        <ul class="minimal-list">
+          <li>Activate Target mode from the floating panel.</li>
+          <li>Hover over any paragraph or heading and click to select it.</li>
+          <li>Apply quick moods or type a custom instruction to transform only that section.</li>
+        </ul>
+      </div>
+
+      <div class="mt-panel" id="panel-ask">
+        <div class="section-title">Ask Mode</div>
+        <ul class="minimal-list">
+          <li>Chat with the AI using the current page as context.</li>
+          <li>Type <kbd>/</kbd> to attach local files (.md, .py, .pdf) for analysis.</li>
+          <li>Responses stream instantly with Markdown formatting.</li>
+        </ul>
+      </div>
+
+      <div class="mt-panel" id="panel-shortcuts">
+        <div class="section-title">Shortcuts</div>
+        <div class="shortcut-row">
+          <span>Toggle Panel</span>
+          <div class="shortcut-keys"><span class="kbd">Ctrl</span><span class="kbd">,</span></div>
+        </div>
+        <div class="shortcut-row">
+          <span>Close / Exit</span>
+          <div class="shortcut-keys"><span class="kbd">Esc</span></div>
+        </div>
+        <div class="shortcut-row">
+          <span>Attach Files</span>
+          <div class="shortcut-keys"><span class="kbd">/</span></div>
+        </div>
+        <div class="shortcut-row">
+          <span>Send Message</span>
+          <div class="shortcut-keys"><span class="kbd">Enter</span></div>
         </div>
       </div>
     </div>
 
-    <!-- Progress -->
-    <div class="progress-bar" id="progress-bar">
-      <div class="spinner"></div>
-      <span id="progress-text">Processing...</span>
-    </div>
-
-    <!-- Status -->
-    <div class="status-bar">
-      <div class="status-dot active" id="status-dot"></div>
-      <span id="status-text">Ready</span>
-    </div>
-
-    <div class="minimal-manual">
-      <button class="manual-trigger" id="manual-trigger">
-        <span>How to use</span>
-        <span class="manual-chevron">↓</span>
-      </button>
-      <div class="manual-content" id="manual-content" hidden>
-        <p>
-          <strong>1. Set Tone:</strong> Pick a mood from the carousel & adjust
-          intensity.
-        </p>
-        <p>
-          <strong>2. Choose Mode:</strong> <br />
-          • <b>Manual:</b> Click Run to translate the page.<br />
-          • <b>Auto:</b> Translates seamlessly as you scroll.<br />
-          • <b>Target (⊕):</b> Click this, then click a specific paragraph to
-          isolate it.
-        </p>
-        <p>
-          <strong>3. Custom:</strong> Click <b>+</b> in the carousel to add your
-          own prompt.
-        </p>
-        <p>
-          <strong>4. Controls:</strong> Use ⏸ to pause or ↻ to reset the page
-          text.
-        </p>
-      </div>
-    </div>
-    <!-- Footer -->
-    <div class="footer">
+    <div class="mt-footer">
       Made with
       <span class="heart">
-        <svg
-          stroke="#ff4d6d"
-          fill="#ff4d6d"
-          strokeWidth="1.5"
-          viewBox="0 0 24 24"
-          height="12"
-          width="12"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <path
-            d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
-          />
+        <svg stroke="#ff4d6d" fill="#ff4d6d" stroke-width="1.5" viewBox="0 0 24 24" height="12" width="12" xmlns="http://www.w3.org/2000/svg">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
         </svg>
       </span>
       by
-      <a
-        target="_blank"
-        rel="noopener noreferrer"
-        class="author-link"
-        href="https://www.linkedin.com/in/mohit-singh-negi/"
-        >this guy</a
-      >
+      <a target="_blank" rel="noopener noreferrer" class="author-link" href="https://www.linkedin.com/in/mohit-singh-negi/">this guy</a>
     </div>
 
-    <!-- Custom Mood Modal -->
-    <div class="modal-overlay" id="mood-modal">
-      <div class="modal">
-        <div class="modal-title">Create Mood</div>
-        <div class="modal-field">
-          <label>Name</label>
-          <input
-            type="text"
-            id="custom-mood-name"
-            placeholder="e.g. Pirate, Shakespearean..."
-            maxlength="20"
-          />
-        </div>
-        <div class="modal-field">
-          <label>Style Description</label>
-          <input
-            type="text"
-            id="custom-mood-desc"
-            placeholder="e.g. Speak like a pirate, Arrrr!"
-            maxlength="80"
-          />
-        </div>
-        <div class="modal-actions">
-          <button class="btn btn-ghost" id="modal-cancel">Cancel</button>
-          <button class="btn btn-primary" id="modal-save">Create</button>
-        </div>
-      </div>
-    </div>
-
-    <script src="popup.js" data-popup-js onerror="this.remove()"></script>
+    <script src="popup.js"></script>
   </body>
 </html>
