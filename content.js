@@ -89,6 +89,84 @@
 
   // Map of requestId → DOM text node
   const inflightRequests = new Map();
+  // Map of requestId → array of child tag names at request time
+  const inflightSnapshots = new Map();
+
+  // =========================================================================
+  // SECTION: UNDO STACK
+  // =========================================================================
+  // A small capped in-memory stack, push-only for now, to support undoing
+  // DOM changes like remove and insert.
+  const undoStack = {
+    maxSize: 50,
+    stack: [],
+    push(item) {
+      this.stack.push(item);
+      if (this.stack.length > this.maxSize) {
+        this.stack.shift();
+      }
+    },
+    pop() {
+      return this.stack.pop();
+    },
+    clear() {
+      this.stack = [];
+    }
+  };
+
+  // =========================================================================
+  // SECTION: DOM SNAPSHOT (Observe Phase)
+  // =========================================================================
+  // Given a target element, produces a compact serialized snapshot of its 
+  // direct children (tag, short text/attribute summary, integer index) for 
+  // use in classification/generation. Capped to first 20 children and 
+  // 40 characters of text per child.
+  function getDOMSnapshot(targetEl) {
+    if (!targetEl || targetEl.nodeType !== Node.ELEMENT_NODE) {
+      return "";
+    }
+    const targetTag = targetEl.tagName.toLowerCase();
+    const targetId = targetEl.id || "";
+    const targetClass = targetEl.className || "";
+    const targetRole = targetEl.getAttribute("role") || "";
+    
+    let snapshotStr = `Target Element: <${targetTag}`;
+    if (targetId) snapshotStr += ` id="${targetId}"`;
+    if (targetClass) snapshotStr += ` class="${targetClass}"`;
+    if (targetRole) snapshotStr += ` role="${targetRole}"`;
+    snapshotStr += `>\n`;
+    
+    const children = Array.from(targetEl.children);
+    if (children.length === 0) {
+      snapshotStr += `(No direct child elements)\n`;
+    } else {
+      snapshotStr += `Direct Children:\n`;
+      const maxChildrenToShow = 20;
+      const displayedChildren = children.slice(0, maxChildrenToShow);
+      
+      displayedChildren.forEach((child, index) => {
+        const tag = child.tagName.toLowerCase();
+        const id = child.id || "";
+        const cls = child.className || "";
+        const role = child.getAttribute("role") || "";
+        let text = child.textContent ? child.textContent.trim().replace(/\s+/g, " ") : "";
+        if (text.length > 40) {
+          text = text.substring(0, 37) + "...";
+        }
+        
+        snapshotStr += `- Index ${index}: <${tag}`;
+        if (id) snapshotStr += ` id="${id}"`;
+        if (cls) snapshotStr += ` class="${cls}"`;
+        if (role) snapshotStr += ` role="${role}"`;
+        snapshotStr += `> "${text}"\n`;
+      });
+      
+      if (children.length > maxChildrenToShow) {
+        snapshotStr += `- +${children.length - maxChildrenToShow} more children not shown\n`;
+      }
+    }
+    return snapshotStr;
+  }
 
   // ── Command tracking ────────────────────────────────────────────────────────
   const commandInflightRequests = new Map(); // requestId → { node, originalText }
@@ -338,15 +416,22 @@
     }
 
     // ── Intent streaming / resolution ───────────────────────────────────────
-    if (msg.type === "INTENT_TEXT_DONE") {
+    // =========================================================================
+    // SECTION: INTENT RESULT HANDLERS (Act Phase - Execution)
+    // =========================================================================
+    const resultHandlers = new Map();
+
+    // 1. Rephrase Handler (INTENT_TEXT_DONE)
+    resultHandlers.set("INTENT_TEXT_DONE", (msg) => {
       const targetEl = inflightRequests.get(msg.requestId);
+      const cb = inflightRequestCallbacks.get(msg.requestId);
       inflightRequests.delete(msg.requestId);
+      inflightRequestCallbacks.delete(msg.requestId);
+      inflightSnapshots.delete(msg.requestId);
       if (targetEl) {
         if (targetEl === document.body) {
           runCommand(msg.prompt);
-          const cb = inflightRequestCallbacks.get(msg.requestId);
           if (cb) {
-            inflightRequestCallbacks.delete(msg.requestId);
             if (cb.onSuccess) cb.onSuccess();
           }
         } else {
@@ -369,10 +454,8 @@
             nodeRequests.push(n);
           }
           
-          const cb = inflightRequestCallbacks.get(msg.requestId);
           if (nodeRequests.length === 0) {
             if (cb) {
-              inflightRequestCallbacks.delete(msg.requestId);
               if (cb.onSuccess) cb.onSuccess();
             }
             return;
@@ -390,7 +473,6 @@
               onSuccess: () => {
                 remaining--;
                 if (remaining <= 0 && cb) {
-                  inflightRequestCallbacks.delete(msg.requestId);
                   if (hasError) { if (cb.onError) cb.onError("Some elements failed"); }
                   else { if (cb.onSuccess) cb.onSuccess(); }
                 }
@@ -399,7 +481,6 @@
                 hasError = true;
                 remaining--;
                 if (remaining <= 0 && cb) {
-                  inflightRequestCallbacks.delete(msg.requestId);
                   if (cb.onError) cb.onError("Failed to process some text");
                 }
               }
@@ -413,11 +494,15 @@
           });
         }
       }
-    }
+    });
 
-    if (msg.type === "INTENT_UI_DONE") {
+    // 2. Style Handler (INTENT_UI_DONE)
+    resultHandlers.set("INTENT_UI_DONE", (msg) => {
       const targetEl = inflightRequests.get(msg.requestId);
+      const cb = inflightRequestCallbacks.get(msg.requestId);
       inflightRequests.delete(msg.requestId);
+      inflightRequestCallbacks.delete(msg.requestId);
+      inflightSnapshots.delete(msg.requestId);
       if (targetEl && msg.css) {
         try {
           const styleObj = JSON.parse(msg.css);
@@ -429,19 +514,18 @@
           targetEl.style.cssText += ";" + msg.css;
         }
       }
-      const cb = inflightRequestCallbacks.get(msg.requestId);
       if (cb) {
-        inflightRequestCallbacks.delete(msg.requestId);
         if (cb.onSuccess) cb.onSuccess();
       }
-    }
+    });
 
-    // ── TRANSFORM_AND_REPLACE result: swap the entire boundary's subtree ────
-    // Old DOM structure (ul/li, etc.) is discarded — no per-node mapping.
-    if (msg.type === "INTENT_REGENERATE_DONE") {
+    // 3. Regenerate Handler (INTENT_REGENERATE_DONE)
+    resultHandlers.set("INTENT_REGENERATE_DONE", (msg) => {
       const targetEl = inflightRequests.get(msg.requestId);
-      inflightRequests.delete(msg.requestId);
       const cb = inflightRequestCallbacks.get(msg.requestId);
+      inflightRequests.delete(msg.requestId);
+      inflightRequestCallbacks.delete(msg.requestId);
+      inflightSnapshots.delete(msg.requestId);
 
       if (targetEl && targetEl.isConnected && msg.html) {
         try {
@@ -450,30 +534,26 @@
             || targetEl.innerHTML;
           targetEl.replaceChildren(safeFrag);
           if (cb) {
-            inflightRequestCallbacks.delete(msg.requestId);
             if (cb.onSuccess) cb.onSuccess();
           }
         } catch (e) {
           console.warn(`${TAG} Failed to apply regenerated HTML:`, e);
           if (cb) {
-            inflightRequestCallbacks.delete(msg.requestId);
             if (cb.onError) cb.onError("Failed to apply result");
           }
         }
       } else if (cb) {
-        inflightRequestCallbacks.delete(msg.requestId);
         if (cb.onError) cb.onError("Target no longer on page");
       }
-    }
+    });
 
-    // ── LOCATE_AND_MODIFY (text_pattern) result: substring-level edits ──────
-    // Targets specific matched substrings inside the selection's text nodes,
-    // rather than whole text nodes — used for "underline words starting with
-    // T", "show the price in USD", etc.
-    if (msg.type === "INTENT_PATTERN_DONE") {
+    // 4. Pattern Handler (INTENT_PATTERN_DONE)
+    resultHandlers.set("INTENT_PATTERN_DONE", (msg) => {
       const targetEl = inflightRequests.get(msg.requestId);
-      inflightRequests.delete(msg.requestId);
       const cb = inflightRequestCallbacks.get(msg.requestId);
+      inflightRequests.delete(msg.requestId);
+      inflightRequestCallbacks.delete(msg.requestId);
+      inflightSnapshots.delete(msg.requestId);
 
       if (targetEl && targetEl.isConnected && msg.matches) {
         try {
@@ -485,7 +565,6 @@
           }
           const matchCount = applyPatternMatches(targetEl, parsed.matches || []);
           if (cb) {
-            inflightRequestCallbacks.delete(msg.requestId);
             if (matchCount > 0) {
               if (cb.onSuccess) cb.onSuccess();
             } else if (cb.onError) {
@@ -495,30 +574,177 @@
         } catch (e) {
           console.warn(`${TAG} Failed to apply pattern matches:`, e);
           if (cb) {
-            inflightRequestCallbacks.delete(msg.requestId);
             if (cb.onError) cb.onError("Failed to apply result");
           }
         }
       } else if (cb) {
-        inflightRequestCallbacks.delete(msg.requestId);
         if (cb.onError) cb.onError("Target no longer on page");
       }
-    }
+    });
 
-    if (msg.type === "INTENT_TOOL_DONE") {
+    // 5. Tool Handler (INTENT_TOOL_DONE)
+    resultHandlers.set("INTENT_TOOL_DONE", (msg) => {
       const cb = inflightRequestCallbacks.get(msg.requestId);
+      inflightRequests.delete(msg.requestId);
+      inflightRequestCallbacks.delete(msg.requestId);
+      inflightSnapshots.delete(msg.requestId);
       if (cb) {
-        inflightRequestCallbacks.delete(msg.requestId);
         if (cb.onSuccess) cb.onSuccess();
       }
-    }
+    });
 
-    if (msg.type === "INTENT_FAIL") {
+    // 6. Structural Edit Handler (INTENT_STRUCTURAL_DONE)
+    resultHandlers.set("INTENT_STRUCTURAL_DONE", (msg) => {
+      const targetEl = inflightRequests.get(msg.requestId);
+      const childTags = inflightSnapshots.get(msg.requestId);
       const cb = inflightRequestCallbacks.get(msg.requestId);
+      inflightRequests.delete(msg.requestId);
+      inflightRequestCallbacks.delete(msg.requestId);
+      inflightSnapshots.delete(msg.requestId);
+
+      if (!targetEl || !targetEl.isConnected) {
+        console.warn(`${TAG} Structural operation failed: Target element not connected or present`);
+        if (cb) {
+          if (cb.onError) cb.onError("Target no longer on page");
+        }
+        return;
+      }
+
+      const { structuralOp, targetIndex, insertPosition, html } = msg;
+
+      // Resolve the actual node to operate on
+      let resolvedNode = null;
+      if (targetIndex === null || targetIndex === undefined) {
+        resolvedNode = targetEl;
+      } else {
+        if (targetEl.children && targetIndex >= 0 && targetIndex < targetEl.children.length) {
+          resolvedNode = targetEl.children[targetIndex];
+        }
+      }
+
+      // Re-verify it is still present and connected before acting
+      if (!resolvedNode || !resolvedNode.isConnected) {
+        console.warn(`${TAG} Structural operation failed: Resolved node not connected or present`);
+        if (cb) {
+          if (cb.onError) cb.onError("Target child node no longer present or connected");
+        }
+        return;
+      }
+
+      // Re-check tag name matches what was in the snapshot at request time
+      if (targetIndex !== null && targetIndex !== undefined && childTags) {
+        const expectedTag = childTags[targetIndex];
+        const actualTag = resolvedNode.tagName.toLowerCase();
+        if (expectedTag && actualTag !== expectedTag) {
+          console.warn(`${TAG} Structural operation failed: Tag mismatch (expected ${expectedTag}, got ${actualTag})`);
+          if (cb) {
+            if (cb.onError) cb.onError("Target element structure changed since request");
+          }
+          return;
+        }
+      }
+
+      try {
+        if (structuralOp === "duplicate") {
+          const clone = resolvedNode.cloneNode(true);
+          // Strip id attributes and MyTake state classes from clone root and subtree
+          const stateClasses = ["mytake-target-locked", "mytake-target-processing", "mytake-target-done", "mytake-target-error"];
+          const cleanNode = (el) => {
+            el.removeAttribute("id");
+            stateClasses.forEach(cls => el.classList.remove(cls));
+          };
+          cleanNode(clone);
+          clone.querySelectorAll("[id], " + stateClasses.map(cls => "." + cls).join(", ")).forEach(cleanNode);
+
+          // Insert adjacent to original
+          resolvedNode.parentNode.insertBefore(clone, resolvedNode.nextSibling);
+
+          if (cb) {
+            if (cb.onSuccess) cb.onSuccess();
+          }
+        } else if (structuralOp === "remove") {
+          // If resolving to lockedTargetEl itself, clean up UI state in correct order
+          if (resolvedNode === lockedTargetEl) {
+            if (isCtxChatActive) resetCtxChat();
+            hideContextualPopup();
+            lockedTargetEl = null;
+          }
+
+          // Push onto capped undo stack
+          undoStack.push({
+            op: "remove",
+            node: resolvedNode,
+            parent: resolvedNode.parentNode,
+            nextSibling: resolvedNode.nextSibling
+          });
+
+          resolvedNode.remove();
+
+          if (cb) {
+            if (cb.onSuccess) cb.onSuccess();
+          }
+        } else if (structuralOp === "insert") {
+          if (!html) {
+            throw new Error("No HTML generated for insert operation");
+          }
+
+          const safeFrag = sanitizeGeneratedHtml(html);
+          
+          // Enforce a cap on the number of top-level generated nodes
+          if (safeFrag.children.length > 10) {
+            throw new Error("Too many top-level nodes in generated HTML fragment (max: 10)");
+          }
+
+          const insertedNodes = Array.from(safeFrag.childNodes);
+
+          // Insert relative to resolvedNode
+          if (insertPosition === "before") {
+            resolvedNode.parentNode.insertBefore(safeFrag, resolvedNode);
+          } else if (insertPosition === "after") {
+            resolvedNode.parentNode.insertBefore(safeFrag, resolvedNode.nextSibling);
+          } else if (insertPosition === "append") {
+            resolvedNode.appendChild(safeFrag);
+          } else if (insertPosition === "prepend") {
+            resolvedNode.insertBefore(safeFrag, resolvedNode.firstChild);
+          } else {
+            throw new Error("Unknown insert position: " + insertPosition);
+          }
+
+          // Push to undo stack
+          undoStack.push({
+            op: "insert",
+            nodes: insertedNodes,
+            parent: resolvedNode.parentNode || resolvedNode
+          });
+
+          if (cb) {
+            if (cb.onSuccess) cb.onSuccess();
+          }
+        } else {
+          throw new Error("Unknown structural operation: " + structuralOp);
+        }
+      } catch (e) {
+        console.warn(`${TAG} Failed to execute structural edit:`, e);
+        if (cb) {
+          if (cb.onError) cb.onError(e.message || "Failed to execute structural edit");
+        }
+      }
+    });
+
+    // 7. Fail Handler (INTENT_FAIL)
+    resultHandlers.set("INTENT_FAIL", (msg) => {
+      const cb = inflightRequestCallbacks.get(msg.requestId);
+      inflightRequests.delete(msg.requestId);
+      inflightRequestCallbacks.delete(msg.requestId);
+      inflightSnapshots.delete(msg.requestId);
       if (cb) {
-        inflightRequestCallbacks.delete(msg.requestId);
         if (cb.onError) cb.onError(msg.error);
       }
+    });
+
+    // Dispatch message if it's handled by resultHandlers
+    if (resultHandlers.has(msg.type)) {
+      resultHandlers.get(msg.type)(msg);
     }
 
     // ── Command streaming ───────────────────────────────────────────────────
@@ -1309,9 +1535,7 @@
         <svg class="mt-theme-icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
         <svg class="mt-theme-icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       </button>
-      <button class="mt-close-panel" id="mt-close-panel" title="Close Panel" style="position: absolute; top: 12px; right: 48px; background: transparent; border: none; color: rgba(255,255,255,0.6); cursor: pointer; padding: 4px; border-radius: 50%; display: flex; align-items: center; justify-content: center; z-index: 2;">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-      </button>
+
       <div class="mt-globe-container">
         <div class="mt-globe-ring">
           <svg class="mt-clover" viewBox="-60 -60 120 130">
@@ -1403,9 +1627,7 @@
     mytakeShadowRoot.appendChild(chicFab);
     mytakeShadowRoot.appendChild(chicMenu);
 
-    chicMenu.querySelector("#mt-close-panel").addEventListener("click", () => {
-      chicMenu.classList.remove("open");
-    });
+
     
     chicMenu.querySelector("#mt-btn-recheck")?.addEventListener("click", () => {
       try { chrome.runtime.sendMessage({ type: "TRIGGER_MODEL_UPDATE" }).catch(()=>{}); } catch (_) {}
@@ -1431,10 +1653,10 @@
     contextualPopup.innerHTML = `
       <div class="ctx-header">Select Mood or Custom Prompt <span class="ctx-close" id="ctx-close">✕</span></div>
       <div class="ctx-moods">${CHIC_MOODS.map(m => `<button class="ctx-mood-btn" data-mood="${m.id}" style="border-bottom: 2px solid ${m.color}">${m.name}</button>`).join("")}</div>
-      <div id="ctx-ask-messages" style="display: none; max-height: 250px; overflow-y: auto; flex-direction: column; gap: 8px; font-size: 11px; margin-top: 4px; padding-right: 4px; scrollbar-width: none;"></div>
+      <div id="ctx-ask-messages" style="display: none; max-height: 400px; overflow-y: auto; flex-direction: column; gap: 8px; font-size: 11px; margin-top: 4px; padding-right: 4px; scrollbar-width: none;"></div>
       <div class="ctx-custom">
         <input type="text" id="ctx-custom-input" placeholder="Ask about this element..." autocomplete="off">
-        <button id="ctx-apply-btn" style="display: none;">Apply</button>
+        <button id="ctx-apply-btn">Apply</button>
         <button id="ctx-ask-btn">Ask AI</button>
       </div>
     `;
@@ -1598,11 +1820,20 @@
                 ctxMoods.querySelectorAll(".ctx-mood-btn").forEach(btn => {
                     btn.addEventListener("click", () => {
                         if (!aiReady) return;
+                        const moodId = btn.dataset.mood;
                         contextualPopup.querySelectorAll(".ctx-mood-btn").forEach(b => b.classList.remove("ctx-mood-selected"));
                         btn.classList.add("ctx-mood-selected");
-                        contextualPopup.querySelector("#ctx-apply-btn").style.display = "";
-                        contextualPopup.querySelector("#ctx-ask-btn").style.display = "none";
-                        contextualPopup.querySelector("#ctx-custom-input").placeholder = "Custom instruction (optional)...";
+                        // Auto-apply the mood immediately
+                        const el = lockedTargetEl;
+                        if (el) {
+                            const customV = contextualPopup.querySelector("#ctx-custom-input").value.trim();
+                            hideContextualPopup();
+                            if (customV) {
+                                applyIntentTargetMode(el, customV);
+                            } else {
+                                applyIntentTargetMode(el, "mood:" + moodId);
+                            }
+                        }
                     });
                 });
             }
@@ -1910,7 +2141,22 @@
     // ── End File Attachment Logic ─────────────────────────────────────────────
 
     const sendAskMessage = (forcedQuestion, forcedContext) => {
-        if (!aiReady) return;
+        if (!aiReady) {
+            // Show a visible message instead of silently failing
+            const question = typeof forcedQuestion === 'string' ? forcedQuestion : askInput.value.trim();
+            if (question) {
+                const reqId = "ask-" + Date.now();
+                const messagesContainer = isCtxChatActive ? mytakeShadowRoot.querySelector("#ctx-ask-messages") : chicMenu.querySelector("#mt-ask-messages");
+                if (messagesContainer) {
+                    const userMsg = document.createElement("div");
+                    userMsg.className = "mt-ask-user-msg";
+                    userMsg.innerText = question;
+                    messagesContainer.appendChild(userMsg);
+                }
+                updateAskMessage(reqId, "AI session is not ready yet. Please wait a moment and try again.", true, true);
+            }
+            return;
+        }
         if (isAskGenerating) {
             postToMain("ASK_PAGE_ABORT", { requestId: currentAskRequestId });
             isAskGenerating = false;
@@ -2062,13 +2308,22 @@
     let ctxSelectedMood = null;
     contextualPopup.querySelectorAll(".ctx-mood-btn").forEach(btn => {
       btn.addEventListener("click", () => {
-        const m = btn.dataset.mood;
-        ctxSelectedMood = m;
+        if (!aiReady) return;
+        const moodId = btn.dataset.mood;
         contextualPopup.querySelectorAll(".ctx-mood-btn").forEach(b => b.classList.remove("ctx-mood-selected"));
         btn.classList.add("ctx-mood-selected");
-        contextualPopup.querySelector("#ctx-apply-btn").style.display = "";
-        contextualPopup.querySelector("#ctx-ask-btn").style.display = "none";
-        ctxInput.placeholder = "Custom instruction (optional)...";
+        // Auto-apply the mood immediately
+        const el = lockedTargetEl;
+        if (el) {
+            const customV = ctxInput.value.trim();
+            hideContextualPopup();
+            if (customV) {
+                applyIntentTargetMode(el, customV);
+            } else {
+                applyIntentTargetMode(el, "mood:" + moodId);
+            }
+            ctxSelectedMood = null;
+        }
       });
     });
 
@@ -2091,20 +2346,23 @@
     };
     const askCustom = () => {
       const v = ctxInput.value.trim();
+      
+      if (!isCtxChatActive) {
+         isCtxChatActive = true;
+         contextualPopup.querySelector(".ctx-moods").style.display = "none";
+         const header = contextualPopup.querySelector(".ctx-header");
+         if (header.firstChild) header.firstChild.textContent = "Target Chat ";
+         contextualPopup.querySelector("#ctx-apply-btn").style.display = "none";
+         contextualPopup.querySelector("#ctx-ask-btn").style.display = "";
+         contextualPopup.querySelector("#ctx-ask-btn").textContent = "Send";
+         contextualPopup.querySelector("#ctx-ask-messages").style.display = "flex";
+      }
+      
       if (v) {
-        if (!isCtxChatActive) {
-           isCtxChatActive = true;
-           contextualPopup.querySelector(".ctx-moods").style.display = "none";
-           const header = contextualPopup.querySelector(".ctx-header");
-           if (header.firstChild) header.firstChild.textContent = "Target Chat ";
-           contextualPopup.querySelector("#ctx-apply-btn").style.display = "none";
-           contextualPopup.querySelector("#ctx-ask-btn").textContent = "Send";
-           contextualPopup.querySelector("#ctx-ask-messages").style.display = "flex";
-        }
-        const el = lockedTargetEl;
-        const text = el ? (el.innerText || "") : "";
-        ctxInput.value = "";
-        sendAskMessage(v, text);
+         const el = lockedTargetEl;
+         const text = el ? (el.innerText || "") : "";
+         ctxInput.value = "";
+         sendAskMessage(v, text);
       }
     };
     contextualPopup.querySelector("#ctx-apply-btn").addEventListener("click", applyCustom);
@@ -2113,8 +2371,7 @@
         e.stopPropagation();
         if(e.key === "Enter") {
             if (isCtxChatActive) askCustom();
-            else if (ctxSelectedMood || contextualPopup.querySelector("#ctx-apply-btn").style.display !== "none") applyCustom();
-            else askCustom();
+            else applyCustom();
         } 
         if(e.key === "Escape") hideContextualPopup();
     });
@@ -2152,25 +2409,24 @@
     function showContextualPopup(x, y) {
     console.log("[MyTake] Showing contextual popup at", x, y);
 
+    isCtxChatActive = false;
+    contextualPopup.querySelector(".ctx-moods").style.display = "";
+    const header = contextualPopup.querySelector(".ctx-header");
+    if (header.firstChild) header.firstChild.textContent = 'Select Mood or Custom Prompt ';
+    contextualPopup.querySelector("#ctx-apply-btn").style.display = "";
+    contextualPopup.querySelector("#ctx-ask-btn").style.display = "";
+    contextualPopup.querySelector("#ctx-ask-btn").textContent = "Ask AI";
+    contextualPopup.querySelector("#ctx-custom-input").placeholder = "Ask about this element...";
+    contextualPopup.querySelectorAll(".ctx-mood-btn").forEach(b => b.classList.remove("ctx-mood-selected"));
+    
+    const msgContainer = contextualPopup.querySelector("#ctx-ask-messages");
+    msgContainer.style.display = "none";
+
     const historyHTML = lockedTargetEl ? targetChatHistory.get(lockedTargetEl) : null;
     if (historyHTML) {
-        isCtxChatActive = true;
-        contextualPopup.querySelector(".ctx-moods").style.display = "none";
-        const header = contextualPopup.querySelector(".ctx-header");
-        if (header.firstChild) header.firstChild.textContent = "Target Chat ";
-        contextualPopup.querySelector("#ctx-apply-btn").style.display = "none";
-        contextualPopup.querySelector("#ctx-ask-btn").style.display = "";
-        contextualPopup.querySelector("#ctx-ask-btn").textContent = "Send";
-        const msgContainer = contextualPopup.querySelector("#ctx-ask-messages");
-        msgContainer.style.display = "flex";
         msgContainer.innerHTML = historyHTML;
-        contextualPopup.querySelector("#ctx-custom-input").placeholder = "Custom instruction (optional)...";
     } else {
-        // Reset to default state: Ask AI visible, Apply hidden, no mood selected
-        contextualPopup.querySelector("#ctx-apply-btn").style.display = "none";
-        contextualPopup.querySelector("#ctx-ask-btn").style.display = "";
-        contextualPopup.querySelector("#ctx-custom-input").placeholder = "Ask about this element...";
-        contextualPopup.querySelectorAll(".ctx-mood-btn").forEach(b => b.classList.remove("ctx-mood-selected"));
+        msgContainer.innerHTML = "";
     }
 
     // clamp bounds
@@ -2228,7 +2484,7 @@
       contextualPopup.querySelector(".ctx-moods").style.display = "";
       const header = contextualPopup.querySelector(".ctx-header");
       if (header.firstChild) header.firstChild.textContent = 'Select Mood or Custom Prompt ';
-      contextualPopup.querySelector("#ctx-apply-btn").style.display = "none";
+      contextualPopup.querySelector("#ctx-apply-btn").style.display = "";
       contextualPopup.querySelector("#ctx-ask-btn").style.display = "";
       contextualPopup.querySelector("#ctx-ask-btn").textContent = "Ask AI";
       contextualPopup.querySelector("#ctx-ask-messages").style.display = "none";
@@ -3310,11 +3566,16 @@
     });
 
     const originalText = targetEl.innerText || targetEl.textContent || "";
+    const snapshot = getDOMSnapshot(targetEl);
+    const childTags = Array.from(targetEl.children).map(child => child.tagName.toLowerCase());
+    inflightSnapshots.set(reqId, childTags);
+
     postToMain("INTENT_REQUEST", {
       requestId: reqId,
       prompt: finalPrompt,
       text: originalText.substring(0, 1000),
-      html: targetEl.outerHTML.substring(0, 1500)
+      html: targetEl.outerHTML.substring(0, 1500),
+      snapshot: snapshot
     });
   }
 

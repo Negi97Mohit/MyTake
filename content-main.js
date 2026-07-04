@@ -269,7 +269,7 @@
 
   async function runItem(item) {
     if (item.typePrefix === "INTENT") {
-      await doIntent(item.requestId, item.prompt, item.text, item.html);
+      await doIntent(item.requestId, item.prompt, item.text, item.html, item.snapshot);
       return;
     }
 
@@ -328,11 +328,16 @@
   //   text_pattern → NEW: substring-level targets ("words starting with T",
   //                  "the price") that don't map to whole text nodes
   //   rephrase     → existing per-text-node rephrase path (today's default)
-  async function classifyJob(prompt, html, tools) {
+  // =========================================================================
+  // SECTION: INTENT CLASSIFIER (Think Phase)
+  // =========================================================================
+  // Live model call to classify the request and extract structural parameters.
+  async function classifyJob(prompt, html, tools, snapshot) {
     const classifierPrompt =
       `You analyze a user's editing request against HTML they selected.\n` +
       `Request: "${prompt}"\n` +
-      `Available tools: ${tools.map((t) => t.name).join(",") || "none"}\n\n` +
+      `Available tools: ${tools.map((t) => t.name).join(",") || "none"}\n` +
+      `DOM Snapshot of the target element and its direct children:\n${snapshot || "None"}\n\n` +
       `Classify into ONE jobType:\n` +
       `- LOCATE_AND_MODIFY: output should keep the same DOM structure/shape. ` +
       `Finding specific text or nodes and changing a narrow property (style, ` +
@@ -344,6 +349,7 @@
       `(lists, paragraphs, headings) is discarded or reshaped. Examples: "summarize ` +
       `this", "turn this into bullet points", "condense this to one sentence", ` +
       `"merge this list into a paragraph".\n` +
+      `- STRUCTURAL_EDIT: used when the DOM tree itself must gain or lose nodes (creating, duplicating, or removing nodes).\n` +
       `- TOOL: the request requires calling one of the available tools.\n\n` +
       `If LOCATE_AND_MODIFY, also pick an operation:\n` +
       `- "style": a visual/CSS change (color, size, spacing, borders, etc.)\n` +
@@ -352,10 +358,23 @@
       `"show the price in USD"\n` +
       `- "rephrase": the existing text should be rewritten in place, same structure, ` +
       `same number of nodes — e.g. tone/style changes to the whole text\n\n` +
-      `Respond ONLY with JSON, no markdown:\n` +
-      `{"jobType": "LOCATE_AND_MODIFY" | "TRANSFORM_AND_REPLACE" | "TOOL", ` +
-      `"operation": "style" | "text_pattern" | "rephrase" | null, ` +
-      `"scopeNote": "<short phrase: what part of the selection is affected, or 'entire selection'>"}`;
+      `If STRUCTURAL_EDIT, decide which abstract change to perform on the DOM tree:\n` +
+      `- "duplicate": create an equivalent copy of an existing node (either the target itself, or one of its indexed children from the DOM snapshot) such that it now co-exists alongside the original.\n` +
+      `- "remove": delete an existing node (either the target itself, or one of its indexed children from the DOM snapshot) so it no longer exists.\n` +
+      `- "insert": create content that does not currently exist and place it near a node (either the target itself, or one of its indexed children from the DOM snapshot).\n\n` +
+      `STRICT STRUCTURAL_EDIT RULES:\n` +
+      `1. You can only target direct children of the target element listed in the DOM Snapshot (one level deep). Do not try to target deeper nested elements.\n` +
+      `2. If you cannot confidently identify which specific child index from the snapshot the user refers to, or if the request concerns the entire target container/element itself, you MUST return "targetIndex": null.\n` +
+      `3. Never guess a targetIndex child index if it is ambiguous.\n\n` +
+      `Respond ONLY with JSON, no markdown outside the JSON block. Do not include any explanation or preamble. The response must match this schema:\n` +
+      `{\n` +
+      `  "jobType": "LOCATE_AND_MODIFY" | "TRANSFORM_AND_REPLACE" | "STRUCTURAL_EDIT" | "TOOL",\n` +
+      `  "operation": "style" | "text_pattern" | "rephrase" | null,\n` +
+      `  "structuralOp": "duplicate" | "remove" | "insert" | null,\n` +
+      `  "targetIndex": null, // integer index of the child node from the DOM snapshot, or null if referring to the target element itself or if ambiguous\n` +
+      `  "insertPosition": "before" | "after" | "append" | "prepend" | null, // where to place new node relative to the target/child node\n` +
+      `  "scopeNote": "<short explanation of change>"\n` +
+      `}`;
 
     const result = await sharedIntentSession.prompt(classifierPrompt);
     const cleaned = result.replace(/```json/g, "").replace(/```/g, "").trim();
@@ -375,7 +394,146 @@
     return { jobType: "LOCATE_AND_MODIFY", operation: "rephrase", scopeNote: "entire selection" };
   }
 
-  async function doIntent(requestId, prompt, text, html) {
+  // =========================================================================
+  // SECTION: INTENT HANDLERS REGISTRY (Act Phase - Generation)
+  // =========================================================================
+  const intentHandlers = new Map();
+
+  intentHandlers.set("LOCATE_AND_MODIFY", async (params) => {
+    const { requestId, prompt, text, html, job } = params;
+
+    if (job.operation === "text_pattern") {
+      const patternPrompt =
+        `User request: "${prompt}"\n` +
+        `Text: "${text}"\n\n` +
+        `Find every exact substring in the text that the request refers to, and the ` +
+        `exact replacement text for each (replacement may equal the original substring ` +
+        `if the request only asks for styling, e.g. underlining — in that case set ` +
+        `"style" instead of changing "replacement").\n` +
+        `Output ONLY JSON, no markdown:\n` +
+        `{"matches": [{"original": "<exact substring from text>", "replacement": "<new text, or same as original if unchanged>", "style": {<optional CSS properties to apply to just this substring>} }]}`;
+      try {
+        const patternResult = await sharedIntentSession.prompt(patternPrompt);
+        const patternCleaned = patternResult.replace(/```json/g, "").replace(/```/g, "").trim();
+        console.log(`[MyTake-Dataset] Pattern match for "${prompt}":`, { prompt: patternPrompt, result: patternCleaned });
+        post("INTENT_PATTERN_DONE", { requestId, matches: patternCleaned });
+      } catch (e) {
+        console.error(`${TAG} Pattern match failed`, e);
+        post("INTENT_FAIL", { requestId, error: e.message || "Pattern match failed" });
+      }
+      return;
+    }
+
+    if (job.operation === "style") {
+      const uiPrompt = `User prompt: "${prompt}"\nHTML: ${html}\nGenerate inline CSS styles to satisfy prompt. Output ONLY JSON mapping CSS properties to values, e.g. {"backgroundColor": "red"}. No markdown.`;
+      const uiResult = await sharedIntentSession.prompt(uiPrompt);
+      const uiCleaned = uiResult.replace(/```json/g, "").replace(/```/g, "").trim();
+      console.log(`[MyTake-Dataset] UI Generation for "${prompt}":`, { prompt: uiPrompt, result: uiCleaned });
+      post("INTENT_UI_DONE", { requestId, css: uiCleaned });
+      return;
+    }
+
+    // Default: rephrase
+    post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
+  });
+
+  intentHandlers.set("TRANSFORM_AND_REPLACE", async (params) => {
+    const { requestId, prompt, html } = params;
+    const regenPrompt =
+      `User request: "${prompt}"\n` +
+      `Original HTML (the boundary to replace):\n${html}\n\n` +
+      `Generate the replacement HTML for this entire boundary that satisfies the request. ` +
+      `Use only simple, safe tags (p, ul, li, span, strong, em, h1-h6, br). ` +
+      `Do not include script, style, or event-handler attributes. ` +
+      `Output ONLY the replacement HTML fragment, no markdown fences, no commentary.`;
+    try {
+      const regenResult = await sharedIntentSession.prompt(regenPrompt);
+      const regenCleaned = regenResult.replace(/```html/g, "").replace(/```/g, "").trim();
+      console.log(`[MyTake-Dataset] Regenerate for "${prompt}":`, { prompt: regenPrompt, result: regenCleaned });
+      post("INTENT_REGENERATE_DONE", { requestId, html: regenCleaned });
+    } catch (e) {
+      console.error(`${TAG} Regenerate failed`, e);
+      post("INTENT_FAIL", { requestId, error: e.message || "Regenerate failed" });
+    }
+  });
+
+  intentHandlers.set("TOOL", async (params) => {
+    const { requestId, prompt, tools } = params;
+    if (tools.length === 0) {
+      const fallbackHandler = intentHandlers.get("LOCATE_AND_MODIFY");
+      await fallbackHandler({ ...params, job: { jobType: "LOCATE_AND_MODIFY", operation: "style" } });
+      return;
+    }
+    const toolPrompt = `Which tool? Available: ${tools.map(t=>t.name).join(',')}. Output ONLY the tool name.`;
+    const toolResult = await sharedIntentSession.prompt(toolPrompt);
+    const toolName = toolResult.replace(/```/g, "").trim();
+    const targetTool = tools.find(t => t.name === toolName);
+
+    if (targetTool) {
+      const argsPrompt = `Given prompt "${prompt}", output JSON args for tool ${targetTool.name} (Schema: ${targetTool.inputSchema}). ONLY output valid JSON.`;
+      const argsResult = await sharedIntentSession.prompt(argsPrompt);
+      const argsCleaned = argsResult.replace(/```json/g, "").replace(/```/g, "").trim();
+      try {
+        const execResult = await document.modelContext.executeTool(targetTool, argsCleaned);
+        console.log(`${TAG} Executed tool ${targetTool.name}:`, execResult);
+        console.log(`[MyTake-Dataset] Tool Execution for "${prompt}":`, { tool: targetTool.name, args: argsCleaned, result: execResult });
+        post("INTENT_TOOL_DONE", { requestId });
+        return;
+      } catch (e) {
+        console.error(`${TAG} Tool execution failed`, e);
+      }
+    }
+    const fallbackHandler = intentHandlers.get("LOCATE_AND_MODIFY");
+    await fallbackHandler({ ...params, job: { jobType: "LOCATE_AND_MODIFY", operation: "style" } });
+  });
+
+  intentHandlers.set("STRUCTURAL_EDIT", async (params) => {
+    const { requestId, prompt, html, job } = params;
+    const { structuralOp, targetIndex, insertPosition } = job;
+
+    if (structuralOp === "duplicate" || structuralOp === "remove") {
+      post("INTENT_STRUCTURAL_DONE", {
+        requestId,
+        structuralOp,
+        targetIndex,
+        insertPosition
+      });
+      return;
+    }
+
+    if (structuralOp === "insert") {
+      const insertPrompt =
+        `User request: "${prompt}"\n` +
+        `Original HTML context:\n${html}\n\n` +
+        `Generate a small HTML fragment to insert that satisfies the request. ` +
+        `STRICT RULES:\n` +
+        `- Use ONLY simple, safe tags: p, ul, li, span, strong, em, h1-h6, br.\n` +
+        `- Do NOT include script, style, or event-handler attributes.\n` +
+        `- You have no network access. Never fabricate specific external URLs, destinations, named entities, or unverifiable facts.\n` +
+        `- If you include a link (a tag), it must not use a fabricated URL. Instead, build a generic query-style link derived from the page's visible context (e.g. href="?q=...") or use "#".\n` +
+        `- Output ONLY the raw HTML fragment. Do not wrap in markdown code blocks or fences. No explanations.`;
+
+      try {
+        const generatedHtml = await sharedIntentSession.prompt(insertPrompt);
+        const cleanedHtml = generatedHtml.replace(/```html/g, "").replace(/```/g, "").trim();
+        post("INTENT_STRUCTURAL_DONE", {
+          requestId,
+          structuralOp,
+          targetIndex,
+          insertPosition,
+          html: cleanedHtml
+        });
+      } catch (e) {
+        console.error(`${TAG} Structural insert generation failed`, e);
+        if (e.message?.includes("destroyed") || e.message?.includes("session has been destroyed")) {
+          throw e;
+        }
+        post("INTENT_FAIL", { requestId, error: e.message || "Insert generation failed" });
+      }
+    }
+  });
+
+  async function doIntent(requestId, prompt, text, html, snapshot) {
     console.log(`${TAG} Starting INTENT for ${requestId}`);
     let tools = [];
     if (document.modelContext && typeof document.modelContext.getTools === "function") {
@@ -392,94 +550,37 @@
         sharedIntentSession = await lm.create({ expectedLanguage: "en", outputLanguage: "en", temperature: 0.2 });
       }
 
-      const job = await classifyJob(prompt, html, tools);
+      const job = await classifyJob(prompt, html, tools, snapshot);
       console.log(`${TAG} Job classified:`, job);
 
-      // ── TOOL ────────────────────────────────────────────────────────────
-      if (job.jobType === "TOOL" && tools.length > 0) {
-        const toolPrompt = `Which tool? Available: ${tools.map(t=>t.name).join(',')}. Output ONLY the tool name.`;
-        const toolResult = await sharedIntentSession.prompt(toolPrompt);
-        const toolName = toolResult.replace(/```/g, "").trim();
-        const targetTool = tools.find(t => t.name === toolName);
-
-        if (targetTool) {
-          const argsPrompt = `Given prompt "${prompt}", output JSON args for tool ${targetTool.name} (Schema: ${targetTool.inputSchema}). ONLY output valid JSON.`;
-          const argsResult = await sharedIntentSession.prompt(argsPrompt);
-          const argsCleaned = argsResult.replace(/```json/g, "").replace(/```/g, "").trim();
-          try {
-            const execResult = await document.modelContext.executeTool(targetTool, argsCleaned);
-            console.log(`${TAG} Executed tool ${targetTool.name}:`, execResult);
-            console.log(`[MyTake-Dataset] Tool Execution for "${prompt}":`, { tool: targetTool.name, args: argsCleaned, result: execResult });
-            post("INTENT_TOOL_DONE", { requestId });
-            return;
-          } catch (e) {
-            console.error(`${TAG} Tool execution failed`, e);
-            // fall through to LOCATE_AND_MODIFY/style as a safe default below
+      // Validate structural parameters
+      if (job.jobType === "STRUCTURAL_EDIT") {
+        const { structuralOp, targetIndex } = job;
+        
+        let targetIsValid = false;
+        if (targetIndex === null || targetIndex === undefined) {
+          targetIsValid = true;
+        } else if (Number.isInteger(targetIndex)) {
+          const matches = snapshot ? snapshot.match(/- Index \d+:/g) : null;
+          const numChildren = matches ? matches.length : 0;
+          if (targetIndex >= 0 && targetIndex < numChildren) {
+            targetIsValid = true;
           }
         }
-        job.jobType = "LOCATE_AND_MODIFY";
-        job.operation = "style";
-      }
-
-      // ── TRANSFORM_AND_REPLACE ──────────────────────────────────────────
-      // Whole boundary is raw material. Generate replacement HTML and swap
-      // the entire subtree — no per-node mapping, old structure discarded.
-      if (job.jobType === "TRANSFORM_AND_REPLACE") {
-        const regenPrompt =
-          `User request: "${prompt}"\n` +
-          `Original HTML (the boundary to replace):\n${html}\n\n` +
-          `Generate the replacement HTML for this entire boundary that satisfies the request. ` +
-          `Use only simple, safe tags (p, ul, li, span, strong, em, h1-h6, br). ` +
-          `Do not include script, style, or event-handler attributes. ` +
-          `Output ONLY the replacement HTML fragment, no markdown fences, no commentary.`;
-        try {
-          const regenResult = await sharedIntentSession.prompt(regenPrompt);
-          const regenCleaned = regenResult.replace(/```html/g, "").replace(/```/g, "").trim();
-          console.log(`[MyTake-Dataset] Regenerate for "${prompt}":`, { prompt: regenPrompt, result: regenCleaned });
-          post("INTENT_REGENERATE_DONE", { requestId, html: regenCleaned });
-        } catch (e) {
-          console.error(`${TAG} Regenerate failed`, e);
-          post("INTENT_FAIL", { requestId, error: e.message || "Regenerate failed" });
+        
+        if (!targetIsValid || !["duplicate", "remove", "insert"].includes(structuralOp)) {
+          console.warn(`${TAG} Validation failed for STRUCTURAL_EDIT. Falling back to rephrase.`);
+          post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
+          return;
         }
-        return;
       }
 
-      // ── LOCATE_AND_MODIFY: text_pattern ──────────────────────────────────
-      // Substring-level target inside the text (not whole text nodes).
-      if (job.jobType === "LOCATE_AND_MODIFY" && job.operation === "text_pattern") {
-        const patternPrompt =
-          `User request: "${prompt}"\n` +
-          `Text: "${text}"\n\n` +
-          `Find every exact substring in the text that the request refers to, and the ` +
-          `exact replacement text for each (replacement may equal the original substring ` +
-          `if the request only asks for styling, e.g. underlining — in that case set ` +
-          `"style" instead of changing "replacement").\n` +
-          `Output ONLY JSON, no markdown:\n` +
-          `{"matches": [{"original": "<exact substring from text>", "replacement": "<new text, or same as original if unchanged>", "style": {<optional CSS properties to apply to just this substring>} }]}`;
-        try {
-          const patternResult = await sharedIntentSession.prompt(patternPrompt);
-          const patternCleaned = patternResult.replace(/```json/g, "").replace(/```/g, "").trim();
-          console.log(`[MyTake-Dataset] Pattern match for "${prompt}":`, { prompt: patternPrompt, result: patternCleaned });
-          post("INTENT_PATTERN_DONE", { requestId, matches: patternCleaned });
-        } catch (e) {
-          console.error(`${TAG} Pattern match failed`, e);
-          post("INTENT_FAIL", { requestId, error: e.message || "Pattern match failed" });
-        }
-        return;
+      const handler = intentHandlers.get(job.jobType);
+      if (handler) {
+        await handler({ requestId, prompt, text, html, tools, job });
+      } else {
+        post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
       }
-
-      // ── LOCATE_AND_MODIFY: style (existing path) ─────────────────────────
-      if (job.jobType === "LOCATE_AND_MODIFY" && job.operation === "style") {
-        const uiPrompt = `User prompt: "${prompt}"\nHTML: ${html}\nGenerate inline CSS styles to satisfy prompt. Output ONLY JSON mapping CSS properties to values, e.g. {"backgroundColor": "red"}. No markdown.`;
-        const uiResult = await sharedIntentSession.prompt(uiPrompt);
-        const uiCleaned = uiResult.replace(/```json/g, "").replace(/```/g, "").trim();
-        console.log(`[MyTake-Dataset] UI Generation for "${prompt}":`, { prompt: uiPrompt, result: uiCleaned });
-        post("INTENT_UI_DONE", { requestId, css: uiCleaned });
-        return;
-      }
-
-      // ── LOCATE_AND_MODIFY: rephrase (existing default path) ──────────────
-      post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
     } catch(err) {
        console.warn(`${TAG} Intent analyzer failed, falling back to TEXT`, err);
        if (err.message && err.message.includes("destroyed")) {
@@ -830,6 +931,7 @@
           prompt: msg.prompt,
           text: msg.text,
           html: msg.html,
+          snapshot: msg.snapshot,
           typePrefix: "INTENT"
         });
         break;
