@@ -23,6 +23,57 @@
   let queueActive = false;
   const activeAskControllers = {};
 
+  let nanoBusy = Promise.resolve(); // global mutex — one Nano session in flight at a time
+
+  async function withNanoSession(sysPromptText, userPrompt, { timeoutMs = 60000 } = {}) {
+    const run = nanoBusy.then(async () => {
+      const lm = getAPI();
+      if (!lm) throw new Error('nano-unavailable');
+      const avail = typeof lm.availability === "function" ? await lm.availability() : (await lm.capabilities()).available;
+      if (avail === 'no') throw new Error('nano-unavailable');
+
+      const controller = new AbortController();
+      let timer;
+      const timeoutPromise = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          console.warn(`${TAG} Nano session timed out after ${timeoutMs}ms`);
+          controller.abort();
+          reject(new Error(`Timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
+      });
+
+      let session;
+      const taskPromise = (async () => {
+        const createOpts = { signal: controller.signal };
+        if (sysPromptText) createOpts.systemPrompt = sysPromptText;
+        session = await lm.create(createOpts);
+        console.log(`${TAG} Nano session created, prompting...`);
+        return await session.prompt(userPrompt, { signal: controller.signal });
+      })();
+
+      try {
+        return await Promise.race([taskPromise, timeoutPromise]);
+      } finally {
+        clearTimeout(timer);
+        session?.destroy();
+      }
+    });
+    nanoBusy = run.catch(() => {}); // a rejection must not poison the queue for the next call
+    return run;
+  }
+
+  const PHASE = {
+    FRAMING: 'Planning',
+    CLASSIFYING: 'Classifying',
+    IMPLEMENTING: 'Implementing',
+    JUDGING: 'Finalizing',
+  };
+
+  function postPhase(requestId, phase, detail) {
+    console.log(`[MyTake Phase: ${phase}]`, detail ?? '');
+    post('INTENT_PHASE_UPDATE', { requestId, phase, detail });
+  }
+
   const MOOD_PROMPTS = {
     explain:
       "Explain this in very simple terms, like I am 5 years old. Break down complex concepts into basic ideas.",
@@ -376,12 +427,21 @@
       `  "scopeNote": "<short explanation of change>"\n` +
       `}`;
 
-    const result = await sharedIntentSession.prompt(classifierPrompt);
+    let result;
+    try {
+      result = await withNanoSession(null, classifierPrompt);
+    } catch (err) {
+      console.warn(`${TAG} Classifier Nano session failed:`, err);
+      throw err; // bubble up to doIntent
+    }
+    
     const cleaned = result.replace(/```json/g, "").replace(/```/g, "").trim();
 
-    console.log(`[MyTake-Dataset] Job Classification for "${prompt}":`, {
-      input: prompt,
-      output: cleaned,
+    console.log(`[MyTake Phase: Classifying] Diagnostics for "${prompt}":`, {
+      framedInput: prompt,
+      rawPromptPassedToModel: classifierPrompt,
+      rawModelOutput: result,
+      parsedOutput: cleaned
     });
 
     try {
@@ -400,8 +460,7 @@
   const intentHandlers = new Map();
 
   intentHandlers.set("LOCATE_AND_MODIFY", async (params) => {
-    const { requestId, prompt, text, html, job } = params;
-
+    const { prompt, text, html, job } = params;
     if (job.operation === "text_pattern") {
       const patternPrompt =
         `User request: "${prompt}"\n` +
@@ -412,33 +471,24 @@
         `"style" instead of changing "replacement").\n` +
         `Output ONLY JSON, no markdown:\n` +
         `{"matches": [{"original": "<exact substring from text>", "replacement": "<new text, or same as original if unchanged>", "style": {<optional CSS properties to apply to just this substring>} }]}`;
-      try {
-        const patternResult = await sharedIntentSession.prompt(patternPrompt);
-        const patternCleaned = patternResult.replace(/```json/g, "").replace(/```/g, "").trim();
-        console.log(`[MyTake-Dataset] Pattern match for "${prompt}":`, { prompt: patternPrompt, result: patternCleaned });
-        post("INTENT_PATTERN_DONE", { requestId, matches: patternCleaned });
-      } catch (e) {
-        console.error(`${TAG} Pattern match failed`, e);
-        post("INTENT_FAIL", { requestId, error: e.message || "Pattern match failed" });
-      }
-      return;
+      const patternResult = await withNanoSession(null, patternPrompt);
+      const patternCleaned = patternResult.replace(/```json/g, "").replace(/```/g, "").trim();
+      return { msgType: "INTENT_PATTERN_DONE", data: { matches: patternCleaned }, evaluateString: patternCleaned };
     }
 
     if (job.operation === "style") {
       const uiPrompt = `User prompt: "${prompt}"\nHTML: ${html}\nGenerate inline CSS styles to satisfy prompt. Output ONLY JSON mapping CSS properties to values, e.g. {"backgroundColor": "red"}. No markdown.`;
-      const uiResult = await sharedIntentSession.prompt(uiPrompt);
+      const uiResult = await withNanoSession(null, uiPrompt);
       const uiCleaned = uiResult.replace(/```json/g, "").replace(/```/g, "").trim();
-      console.log(`[MyTake-Dataset] UI Generation for "${prompt}":`, { prompt: uiPrompt, result: uiCleaned });
-      post("INTENT_UI_DONE", { requestId, css: uiCleaned });
-      return;
+      return { msgType: "INTENT_UI_DONE", data: { css: uiCleaned }, evaluateString: uiCleaned };
     }
 
     // Default: rephrase
-    post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
+    return { msgType: "INTENT_TEXT_DONE", data: { prompt }, evaluateString: "Rephrase text" };
   });
 
   intentHandlers.set("TRANSFORM_AND_REPLACE", async (params) => {
-    const { requestId, prompt, html } = params;
+    const { prompt, html } = params;
     const regenPrompt =
       `User request: "${prompt}"\n` +
       `Original HTML (the boundary to replace):\n${html}\n\n` +
@@ -446,59 +496,44 @@
       `Use only simple, safe tags (p, ul, li, span, strong, em, h1-h6, br). ` +
       `Do not include script, style, or event-handler attributes. ` +
       `Output ONLY the replacement HTML fragment, no markdown fences, no commentary.`;
-    try {
-      const regenResult = await sharedIntentSession.prompt(regenPrompt);
-      const regenCleaned = regenResult.replace(/```html/g, "").replace(/```/g, "").trim();
-      console.log(`[MyTake-Dataset] Regenerate for "${prompt}":`, { prompt: regenPrompt, result: regenCleaned });
-      post("INTENT_REGENERATE_DONE", { requestId, html: regenCleaned });
-    } catch (e) {
-      console.error(`${TAG} Regenerate failed`, e);
-      post("INTENT_FAIL", { requestId, error: e.message || "Regenerate failed" });
-    }
+    const regenResult = await withNanoSession(null, regenPrompt);
+    const regenCleaned = regenResult.replace(/```html/g, "").replace(/```/g, "").trim();
+    return { msgType: "INTENT_REGENERATE_DONE", data: { html: regenCleaned }, evaluateString: regenCleaned };
   });
 
   intentHandlers.set("TOOL", async (params) => {
-    const { requestId, prompt, tools } = params;
+    const { prompt, tools } = params;
     if (tools.length === 0) {
       const fallbackHandler = intentHandlers.get("LOCATE_AND_MODIFY");
-      await fallbackHandler({ ...params, job: { jobType: "LOCATE_AND_MODIFY", operation: "style" } });
-      return;
+      return await fallbackHandler({ ...params, job: { jobType: "LOCATE_AND_MODIFY", operation: "style" } });
     }
     const toolPrompt = `Which tool? Available: ${tools.map(t=>t.name).join(',')}. Output ONLY the tool name.`;
-    const toolResult = await sharedIntentSession.prompt(toolPrompt);
+    const toolResult = await withNanoSession(null, toolPrompt);
     const toolName = toolResult.replace(/```/g, "").trim();
     const targetTool = tools.find(t => t.name === toolName);
 
     if (targetTool) {
       const argsPrompt = `Given prompt "${prompt}", output JSON args for tool ${targetTool.name} (Schema: ${targetTool.inputSchema}). ONLY output valid JSON.`;
-      const argsResult = await sharedIntentSession.prompt(argsPrompt);
+      const argsResult = await withNanoSession(null, argsPrompt);
       const argsCleaned = argsResult.replace(/```json/g, "").replace(/```/g, "").trim();
-      try {
-        const execResult = await document.modelContext.executeTool(targetTool, argsCleaned);
-        console.log(`${TAG} Executed tool ${targetTool.name}:`, execResult);
-        console.log(`[MyTake-Dataset] Tool Execution for "${prompt}":`, { tool: targetTool.name, args: argsCleaned, result: execResult });
-        post("INTENT_TOOL_DONE", { requestId });
-        return;
-      } catch (e) {
-        console.error(`${TAG} Tool execution failed`, e);
-      }
+      const execResult = await document.modelContext.executeTool(targetTool, argsCleaned);
+      console.log(`${TAG} Executed tool ${targetTool.name}:`, execResult);
+      return { msgType: "INTENT_TOOL_DONE", data: {}, evaluateString: "Tool executed" };
     }
     const fallbackHandler = intentHandlers.get("LOCATE_AND_MODIFY");
-    await fallbackHandler({ ...params, job: { jobType: "LOCATE_AND_MODIFY", operation: "style" } });
+    return await fallbackHandler({ ...params, job: { jobType: "LOCATE_AND_MODIFY", operation: "style" } });
   });
 
   intentHandlers.set("STRUCTURAL_EDIT", async (params) => {
-    const { requestId, prompt, html, job } = params;
+    const { prompt, html, job } = params;
     const { structuralOp, targetIndex, insertPosition } = job;
 
     if (structuralOp === "duplicate" || structuralOp === "remove") {
-      post("INTENT_STRUCTURAL_DONE", {
-        requestId,
-        structuralOp,
-        targetIndex,
-        insertPosition
-      });
-      return;
+      return { 
+        msgType: "INTENT_STRUCTURAL_DONE", 
+        data: { structuralOp, targetIndex, insertPosition }, 
+        evaluateString: `Structural ${structuralOp}` 
+      };
     }
 
     if (structuralOp === "insert") {
@@ -513,80 +548,112 @@
         `- If you include a link (a tag), it must not use a fabricated URL. Instead, build a generic query-style link derived from the page's visible context (e.g. href="?q=...") or use "#".\n` +
         `- Output ONLY the raw HTML fragment. Do not wrap in markdown code blocks or fences. No explanations.`;
 
-      try {
-        const generatedHtml = await sharedIntentSession.prompt(insertPrompt);
-        const cleanedHtml = generatedHtml.replace(/```html/g, "").replace(/```/g, "").trim();
-        post("INTENT_STRUCTURAL_DONE", {
-          requestId,
-          structuralOp,
-          targetIndex,
-          insertPosition,
-          html: cleanedHtml
-        });
-      } catch (e) {
-        console.error(`${TAG} Structural insert generation failed`, e);
-        if (e.message?.includes("destroyed") || e.message?.includes("session has been destroyed")) {
-          throw e;
-        }
-        post("INTENT_FAIL", { requestId, error: e.message || "Insert generation failed" });
-      }
+      const generatedHtml = await withNanoSession(null, insertPrompt);
+      const cleanedHtml = generatedHtml.replace(/```html/g, "").replace(/```/g, "").trim();
+      return { 
+        msgType: "INTENT_STRUCTURAL_DONE", 
+        data: { structuralOp, targetIndex, insertPosition, html: cleanedHtml },
+        evaluateString: cleanedHtml
+      };
     }
   });
 
+  async function runFramer(prompt, html) {
+    const sysPrompt = `You are a prompt engineer. Your ONLY job is to rewrite the user's raw prompt into a clear, precise, declarative instruction describing WHAT needs to be done. NEVER execute the request. NEVER output HTML, CSS, or JSON. ONLY output the rewritten instruction string.`;
+    const userPrompt = `Raw Prompt: "${prompt}"\nContext HTML: ${html}\n\nRewrite the Raw Prompt into a clear instruction:`;
+    return await withNanoSession(sysPrompt, userPrompt);
+  }
+
+  async function runJudge(framedPrompt, html, evaluateString, jobType, structuralOp) {
+    const isDestructive = jobType === "STRUCTURAL_EDIT" && (structuralOp === "remove" || structuralOp === "duplicate");
+    const sysPrompt = `You are a judge. Evaluate if the proposed change satisfies the user's intent on the given HTML. You MUST output ONLY a JSON object with EXACTLY two keys: "passed" (boolean) and "reason" (string). If the intent cannot be fulfilled (e.g. missing data) or the proposed change fails to fulfill it, you MUST set "passed": false.`;
+    const userPrompt = `Intent: "${framedPrompt}"\nHTML: ${html}\nProposed Change:\n${evaluateString}\n\nOutput {"passed": boolean, "reason": "short reason"} now:`;
+    try {
+      const result = await withNanoSession(sysPrompt, userPrompt);
+      const cleaned = result.replace(/```json/g, "").replace(/```/g, "").trim();
+      const parsed = JSON.parse(cleaned);
+      if (typeof parsed.passed !== "boolean") {
+        return { passed: true, reason: "Judge returned invalid schema, defaulting to pass" };
+      }
+      return parsed;
+    } catch (e) {
+      console.warn(`${TAG} Judge failed to parse, defaulting to pass:`, e);
+      return { passed: true, reason: "Judge parsing failed" };
+    }
+  }
+
   async function doIntent(requestId, prompt, text, html, snapshot) {
     console.log(`${TAG} Starting INTENT for ${requestId}`);
+    postPhase(requestId, PHASE.FRAMING, `Framing prompt: "${prompt}"`);
+
     let tools = [];
     if (document.modelContext && typeof document.modelContext.getTools === "function") {
       try {
         tools = await document.modelContext.getTools() || [];
-      } catch (e) {
-        console.warn(`${TAG} Failed to get WebMCP tools:`, e);
-      }
+      } catch (e) {}
     }
 
-    const lm = getAPI();
     try {
-      if (!sharedIntentSession) {
-        sharedIntentSession = await lm.create({ expectedLanguage: "en", outputLanguage: "en", temperature: 0.2 });
+      // 1. Framing
+      let framedPrompt = prompt;
+      try {
+        framedPrompt = await runFramer(prompt, html);
+        console.log(`[MyTake Phase: Planning] "${prompt}" → "${framedPrompt}"`);
+      } catch (e) {
+        console.warn(`${TAG} Framer failed, falling back to raw prompt:`, e);
       }
 
-      const job = await classifyJob(prompt, html, tools, snapshot);
-      console.log(`${TAG} Job classified:`, job);
-
-      // Validate structural parameters
+      // 2. Classifying
+      postPhase(requestId, PHASE.CLASSIFYING, "Determining operation type");
+      const job = await classifyJob(framedPrompt, html, tools, snapshot);
+      
       if (job.jobType === "STRUCTURAL_EDIT") {
         const { structuralOp, targetIndex } = job;
-        
         let targetIsValid = false;
         if (targetIndex === null || targetIndex === undefined) {
           targetIsValid = true;
         } else if (Number.isInteger(targetIndex)) {
           const matches = snapshot ? snapshot.match(/- Index \d+:/g) : null;
           const numChildren = matches ? matches.length : 0;
-          if (targetIndex >= 0 && targetIndex < numChildren) {
-            targetIsValid = true;
-          }
+          if (targetIndex >= 0 && targetIndex < numChildren) targetIsValid = true;
         }
-        
         if (!targetIsValid || !["duplicate", "remove", "insert"].includes(structuralOp)) {
           console.warn(`${TAG} Validation failed for STRUCTURAL_EDIT. Falling back to rephrase.`);
-          post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
+          post("INTENT_TEXT_DONE", { requestId, prompt: framedPrompt });
+          post("INTENT_PHASE_CLEANUP", { requestId });
           return;
         }
       }
 
+      // 3. Implementing
+      postPhase(requestId, PHASE.IMPLEMENTING, `Executing ${job.jobType}`);
       const handler = intentHandlers.get(job.jobType);
-      if (handler) {
-        await handler({ requestId, prompt, text, html, tools, job });
-      } else {
-        post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
+      if (!handler) {
+        post("INTENT_TEXT_DONE", { requestId, prompt: framedPrompt });
+        post("INTENT_PHASE_CLEANUP", { requestId });
+        return;
       }
+      
+      const result = await handler({ requestId, prompt: framedPrompt, text, html, tools, job });
+      
+      // 4. Finalizing (Judging)
+      postPhase(requestId, PHASE.JUDGING, "Verifying changes");
+      const verdict = await runJudge(framedPrompt, html, result.evaluateString, job.jobType, job.structuralOp);
+      console.log(`[MyTake Phase: Finalizing] Judge verdict:`, verdict);
+
+      const isDestructive = job.jobType === "STRUCTURAL_EDIT" && ["remove", "duplicate", "insert"].includes(job.structuralOp);
+
+      if (!verdict.passed && isDestructive) {
+        post("INTENT_NEEDS_CONFIRMATION", { requestId, ...result.data, reason: verdict.reason });
+      } else {
+        post(result.msgType, { requestId, ...result.data, judgeWarning: verdict.passed ? null : verdict.reason });
+      }
+
+      post("INTENT_PHASE_CLEANUP", { requestId });
     } catch(err) {
-       console.warn(`${TAG} Intent analyzer failed, falling back to TEXT`, err);
-       if (err.message && err.message.includes("destroyed")) {
-           sharedIntentSession = null;
-       }
-       post("INTENT_TEXT_DONE", { requestId, prompt: prompt });
+       console.warn(`${TAG} Intent pipeline failed:`, err);
+       post("INTENT_PHASE_CLEANUP", { requestId });
+       post("INTENT_FAIL", { requestId, error: err.message || "Pipeline failed" });
     }
   }
 

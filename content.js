@@ -742,8 +742,99 @@
       }
     });
 
+    resultHandlers.set("INTENT_PHASE_UPDATE", (msg) => {
+      const targetEl = inflightRequests.get(msg.requestId);
+      if (targetEl && phaseToast) {
+        const rect = targetEl.getBoundingClientRect();
+        phaseToast.style.display = "block";
+        phaseToast.style.background = "rgba(0,0,0,0.85)";
+        phaseToast.style.pointerEvents = "none";
+        delete phaseToast.dataset.warning;
+        phaseToast.innerHTML = `${msg.phase} <span style="font-weight:400; opacity:0.8; margin-left:6px;">${msg.detail || ""}</span>`;
+        phaseToast.style.left = `${rect.left}px`;
+        phaseToast.style.top = `${rect.top}px`;
+      }
+    });
+
+    resultHandlers.set("INTENT_PHASE_CLEANUP", (msg) => {
+      if (phaseToast && phaseToast.dataset.warning !== "true") {
+        phaseToast.style.display = "none";
+      }
+    });
+
+    resultHandlers.set("INTENT_NEEDS_CONFIRMATION", (msg) => {
+      const targetEl = inflightRequests.get(msg.requestId);
+      if (targetEl && phaseToast) {
+        const rect = targetEl.getBoundingClientRect();
+        phaseToast.style.display = "block";
+        phaseToast.style.background = "#b91c1c";
+        phaseToast.style.pointerEvents = "auto";
+        phaseToast.dataset.warning = "true";
+        phaseToast.innerHTML = `
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span>⚠️ Judge flagged this ${msg.structuralOp || 'change'}</span>
+            <button id="mt-toast-confirm" style="background:#fff; color:#b91c1c; border:none; border-radius:4px; padding:2px 6px; cursor:pointer; font-weight:bold;">Apply Anyway</button>
+            <button id="mt-toast-cancel" style="background:transparent; color:#fff; border:1px solid rgba(255,255,255,0.5); border-radius:4px; padding:2px 6px; cursor:pointer;">Cancel</button>
+          </div>
+          <div style="font-weight:400; font-size:10px; opacity:0.9; margin-top:4px; white-space:normal; max-width:250px;">${msg.reason}</div>
+        `;
+        phaseToast.style.left = `${rect.left}px`;
+        phaseToast.style.top = `${rect.top}px`;
+
+        const applyBtn = phaseToast.querySelector("#mt-toast-confirm");
+        const cancelBtn = phaseToast.querySelector("#mt-toast-cancel");
+
+        const cleanup = () => {
+          phaseToast.style.display = "none";
+          delete phaseToast.dataset.warning;
+          inflightRequests.delete(msg.requestId);
+          inflightRequestCallbacks.delete(msg.requestId);
+          inflightSnapshots.delete(msg.requestId);
+          if (targetEl) targetEl.classList.remove("mytake-target-processing");
+        };
+
+        applyBtn.addEventListener("click", () => {
+          msg.type = "INTENT_STRUCTURAL_DONE";
+          resultHandlers.get(msg.type)(msg); // manually route it to the done handler
+          cleanup();
+        });
+
+        cancelBtn.addEventListener("click", cleanup);
+      }
+    });
+
+    function handleJudgeWarning(msg) {
+      if (msg.judgeWarning && phaseToast) {
+        const targetEl = inflightRequests.get(msg.requestId);
+        if (targetEl) {
+          const rect = targetEl.getBoundingClientRect();
+          phaseToast.style.display = "block";
+          phaseToast.style.background = "#ea580c"; // orange for non-destructive warning
+          phaseToast.style.pointerEvents = "auto";
+          phaseToast.dataset.warning = "true";
+          phaseToast.innerHTML = `
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span>⚠️ AI applied this, but...</span>
+              <button id="mt-toast-dismiss" style="background:transparent; color:#fff; border:none; cursor:pointer; font-size:14px; padding:0;">✕</button>
+            </div>
+            <div style="font-weight:400; font-size:10px; opacity:0.9; margin-top:4px; white-space:normal; max-width:250px;">${msg.judgeWarning}</div>
+          `;
+          phaseToast.style.left = `${rect.left}px`;
+          phaseToast.style.top = `${rect.top}px`;
+          
+          phaseToast.querySelector("#mt-toast-dismiss").addEventListener("click", () => {
+            phaseToast.style.display = "none";
+            delete phaseToast.dataset.warning;
+          });
+        }
+      }
+    }
+
     // Dispatch message if it's handled by resultHandlers
     if (resultHandlers.has(msg.type)) {
+      if (msg.type.endsWith("_DONE") && msg.judgeWarning) {
+        handleJudgeWarning(msg);
+      }
       resultHandlers.get(msg.type)(msg);
     }
 
@@ -1195,63 +1286,78 @@
   // Returns the number of matches actually applied.
   function applyPatternMatches(targetEl, matches) {
     if (!Array.isArray(matches) || matches.length === 0) return 0;
-
     let appliedCount = 0;
-    const walker = document.createTreeWalker(targetEl, NodeFilter.SHOW_TEXT, {
-      acceptNode(n) {
-        if (!n.parentElement) return NodeFilter.FILTER_REJECT;
-        if (SKIP_TAGS.has(n.parentElement.tagName.toUpperCase()))
-          return NodeFilter.FILTER_REJECT;
-        if (isExcludedAncestry(n)) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
 
-    // Snapshot nodes first since we'll be mutating the tree as we go
-    // (splitting text nodes), which would otherwise confuse the walker.
-    const textNodes = [];
-    let n;
-    while ((n = walker.nextNode())) textNodes.push(n);
+    const validMatches = matches.filter(m => m && m.original);
 
-    for (const match of matches) {
-      const original = match && match.original;
-      if (!original) continue;
-      const replacement =
-        typeof match.replacement === "string" ? match.replacement : original;
-      const style = match.style && typeof match.style === "object" ? match.style : null;
-
-      for (const node of textNodes) {
-        if (!node.isConnected) continue;
-        const idx = node.textContent.indexOf(original);
-        if (idx === -1) continue;
-
-        const before = node.textContent.slice(0, idx);
-        const after = node.textContent.slice(idx + original.length);
-        const parent = node.parentNode;
-        if (!parent) continue;
-
-        const frag = document.createDocumentFragment();
-        if (before) frag.appendChild(document.createTextNode(before));
-
-        if (style) {
-          const span = document.createElement("span");
-          span.textContent = replacement;
-          for (const key in style) {
-            const kebabKey = key.replace(/([A-Z])/g, "-$1").toLowerCase();
-            span.style.setProperty(kebabKey, style[key]);
-          }
-          frag.appendChild(span);
-        } else {
-          frag.appendChild(document.createTextNode(replacement));
+    let madeChanges = true;
+    while (madeChanges) {
+      madeChanges = false;
+      const walker = document.createTreeWalker(targetEl, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          if (n._mytakeProcessed) return NodeFilter.FILTER_REJECT;
+          if (!n.parentElement) return NodeFilter.FILTER_REJECT;
+          if (SKIP_TAGS.has(n.parentElement.tagName.toUpperCase())) return NodeFilter.FILTER_REJECT;
+          if (isExcludedAncestry(n)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
         }
+      });
 
-        if (after) frag.appendChild(document.createTextNode(after));
-        parent.replaceChild(frag, node);
-        appliedCount++;
-        break; // move to next match; this text node is now stale
+      let node;
+      while ((node = walker.nextNode())) {
+        let appliedToThisNode = false;
+        for (const match of validMatches) {
+          const original = match.original;
+          const idx = node.textContent.indexOf(original);
+          if (idx !== -1) {
+            const before = node.textContent.slice(0, idx);
+            const after = node.textContent.slice(idx + original.length);
+            const parent = node.parentNode;
+            
+            const frag = document.createDocumentFragment();
+            if (before) frag.appendChild(document.createTextNode(before));
+            
+            const replacement = typeof match.replacement === "string" ? match.replacement : original;
+            const style = match.style && typeof match.style === "object" ? match.style : null;
+            
+            let insertedNode;
+            if (style) {
+              const span = document.createElement("span");
+              span.textContent = replacement;
+              for (const key in style) {
+                const kebabKey = key.replace(/([A-Z])/g, "-$1").toLowerCase();
+                span.style.setProperty(kebabKey, style[key]);
+              }
+              insertedNode = span;
+              frag.appendChild(span);
+            } else {
+              const txt = document.createTextNode(replacement);
+              txt._mytakeProcessed = true;
+              insertedNode = txt;
+              frag.appendChild(txt);
+            }
+            
+            if (after) frag.appendChild(document.createTextNode(after));
+            parent.replaceChild(frag, node);
+            
+            // Mark children of span as processed to avoid infinite loops
+            if (style) {
+              const spanWalker = document.createTreeWalker(insertedNode, NodeFilter.SHOW_TEXT);
+              let childText;
+              while ((childText = spanWalker.nextNode())) {
+                childText._mytakeProcessed = true;
+              }
+            }
+            
+            appliedCount++;
+            madeChanges = true;
+            appliedToThisNode = true;
+            break; // Break matches loop, restart walker
+          }
+        }
+        if (appliedToThisNode) break; // Break walker loop, restart
       }
     }
-
     return appliedCount;
   }
 
@@ -1483,6 +1589,7 @@
   } catch(e) {}
 
   let contextualPopup = null;
+  let phaseToast = null;
   let lockedTargetEl = null;
   let mytakeShadowHost = null;
   let mytakeShadowRoot = null;
@@ -1661,6 +1768,11 @@
       </div>
     `;
     mytakeShadowRoot.appendChild(contextualPopup);
+
+    phaseToast = document.createElement("div");
+    phaseToast.className = "mytake-phase-toast";
+    phaseToast.style.cssText = "display: none; position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; pointer-events: none; z-index: 2147483647; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.5); transform: translateY(-100%); margin-top: -8px;";
+    mytakeShadowRoot.appendChild(phaseToast);
 
     const items = chicMenu.querySelectorAll(".mt-carousel-item");
     const label = chicMenu.querySelector("#mt-globe-label");
@@ -1881,6 +1993,7 @@
     currentAskRequestId = null;
 
     const openAskPanel = () => {
+        isCtxChatActive = false;
         askPanel.style.display = "flex";
         carouselView.style.display = "none";
         customContainer.style.display = "none";
@@ -2197,11 +2310,15 @@
                 filesPayload.push({ name: f.name, content: f.content });
             });
             
-            if (cleanContext.length + fileContextLength > MAX_CONTEXT_CHARS) {
-                updateAskMessage(requestId, "Context window breached select something smaller", true, true);
-                isAskGenerating = false;
-                return;
+            if (cleanContext.length + fileContextLength > 50000) {
+                 updateAskMessage(requestId, "Target context is extremely large and breached limits, please select a smaller area.", true, true);
+                 isAskGenerating = false;
+                 return;
             }
+            
+            // Truncate to available budget
+            const availableChars = Math.max(0, MAX_CONTEXT_CHARS - fileContextLength);
+            cleanContext = cleanContext.substring(0, availableChars);
         } else {
             const rawText = document.body.innerText || "";
             cleanContext = rawText.replace(/[\r\n\s]+/g, " ");
